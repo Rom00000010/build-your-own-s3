@@ -1,6 +1,10 @@
 package s3
 
-import "errors"
+import (
+	"errors"
+	"os"
+	"path/filepath"
+)
 
 var (
 	InvalidBucketNameErr = errors.New("invalid bucket name")
@@ -12,46 +16,87 @@ var (
 	ObjectNotExistErr    = errors.New("object does not exist")
 )
 
-// 外层 map 按桶名找桶，内层 map 按 key 找对象的字节内容。
-// 桶名和 key 均合法；每个桶的内层 map 已初始化，对象内容非空。
-// 传入和返回的字节切片不与内部数据共享。
-var buckets = make(map[string]map[string][]byte)
+// S3 表示一份已打开的对象存储。关闭后不能继续使用该实例。
+type S3 struct {
+	db    *objectDB
+	files *objectStorage
+}
 
-func CreateBucket(name string) (string, error) {
+// Open 打开当前工作目录下 data 中的存储；首次打开时创建空存储。
+func Open() (*S3, error) {
+	root, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	dataDir := filepath.Join(root, "data")
+	files, err := openObjectStorage(filepath.Join(dataDir, "objects"))
+	if err != nil {
+		return nil, err
+	}
+	db, err := openObjectDB(filepath.Join(dataDir, "metadata.db"))
+	if err != nil {
+		return nil, err
+	}
+	return &S3{db: db, files: files}, nil
+}
+
+// Close 关闭存储。成功关闭后可再次调用 Open 读取已有数据。
+func (s *S3) Close() error {
+	if s.db == nil {
+		return errors.New("store is not open")
+	}
+	if err := s.db.close(); err != nil {
+		return err
+	}
+	s.db = nil
+	return nil
+}
+
+// CreateBucket 创建空桶，成功时返回桶名；名称不合法或已存在时返回对应错误。
+func (s *S3) CreateBucket(name string) (string, error) {
 	if !validBucketName(name) {
 		return "", InvalidBucketNameErr
 	}
-	if _, exists := buckets[name]; exists {
+	created, err := s.db.createBucket(name)
+	if err != nil {
+		return "", err
+	}
+	if !created {
 		return "", BucketNameExistErr
 	}
-	buckets[name] = make(map[string][]byte)
 	return name, nil
 }
 
 // ListBuckets 返回全部桶名，顺序不作保证。
-func ListBuckets() ([]string, error) {
-	names := make([]string, 0, len(buckets))
-	for name := range buckets {
-		names = append(names, name)
-	}
-	return names, nil
+func (s *S3) ListBuckets() ([]string, error) {
+	return s.db.listBuckets()
 }
 
 // DeleteBucket 删除空桶；桶不存在或非空时返回对应错误。
-func DeleteBucket(name string) error {
-	objects, exists := buckets[name]
+func (s *S3) DeleteBucket(name string) error {
+	deleted, err := s.db.deleteEmptyBucket(name)
+	if err != nil {
+		return err
+	}
+	if deleted {
+		return nil
+	}
+	exists, err := s.db.bucketExists(name)
+	if err != nil {
+		return err
+	}
 	if !exists {
 		return BucketNotExistErr
 	}
-	if len(objects) != 0 {
-		return BucketNotEmptyErr
-	}
-	delete(buckets, name)
-	return nil
+	return BucketNotEmptyErr
 }
 
-func PutObject(bucket string, key string, object []byte) error {
-	objects, exists := buckets[bucket]
+// PutObject 上传非空对象；同一 key 已存在时，完整替换原内容。
+func (s *S3) PutObject(bucket string, key string, object []byte) error {
+	exists, err := s.db.bucketExists(bucket)
+	if err != nil {
+		return err
+	}
 	if !exists {
 		return BucketNotExistErr
 	}
@@ -61,47 +106,85 @@ func PutObject(bucket string, key string, object []byte) error {
 	if len(object) == 0 {
 		return EmptyObjectErr
 	}
-	objects[key] = append([]byte(nil), object...)
+	oldName, _, err := s.db.objectFile(bucket, key)
+	if err != nil {
+		return err
+	}
+	// 先写新文件，再切换元数据；文件写入失败时，原对象仍可读取。
+	newName, err := s.files.write(object)
+	if err != nil {
+		return err
+	}
+	if err := s.db.setObjectFile(bucket, key, newName); err != nil {
+		_ = s.files.remove(newName)
+		return err
+	}
+	// 元数据已指向新文件；旧文件清理失败不影响这次上传的结果。
+	if oldName != "" {
+		_ = s.files.remove(oldName)
+	}
 	return nil
 }
 
-func GetObject(bucket string, key string) ([]byte, error) {
-	objects, exists := buckets[bucket]
+// GetObject 返回对象的完整内容；桶不存在、key 不合法或对象不存在时返回对应错误。
+func (s *S3) GetObject(bucket string, key string) ([]byte, error) {
+	exists, err := s.db.bucketExists(bucket)
+	if err != nil {
+		return nil, err
+	}
 	if !exists {
 		return nil, BucketNotExistErr
 	}
 	if !validObjectKey(key) {
 		return nil, InvalidObjectKeyErr
 	}
-	object, exists := objects[key]
+	name, exists, err := s.db.objectFile(bucket, key)
+	if err != nil {
+		return nil, err
+	}
 	if !exists {
 		return nil, ObjectNotExistErr
 	}
-	return append([]byte(nil), object...), nil
+	return s.files.read(name)
 }
 
-func DeleteObject(bucket string, key string) error {
-	objects, exists := buckets[bucket]
+// DeleteObject 删除对象；key 不存在时也返回 nil。
+func (s *S3) DeleteObject(bucket string, key string) error {
+	exists, err := s.db.bucketExists(bucket)
+	if err != nil {
+		return err
+	}
 	if !exists {
 		return BucketNotExistErr
 	}
 	if !validObjectKey(key) {
 		return InvalidObjectKeyErr
 	}
-	delete(objects, key)
+	name, exists, err := s.db.objectFile(bucket, key)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if err := s.db.deleteObject(bucket, key); err != nil {
+		return err
+	}
+	// 元数据已删除；文件清理失败不影响对象对调用方的可见状态。
+	_ = s.files.remove(name)
 	return nil
 }
 
-func ListObjects(bucket string) ([]string, error) {
-	objects, exists := buckets[bucket]
+// ListObjects 返回桶内全部 key，顺序不作保证；空桶返回非 nil 的空切片。
+func (s *S3) ListObjects(bucket string) ([]string, error) {
+	exists, err := s.db.bucketExists(bucket)
+	if err != nil {
+		return nil, err
+	}
 	if !exists {
 		return nil, BucketNotExistErr
 	}
-	keys := make([]string, 0, len(objects))
-	for key := range objects {
-		keys = append(keys, key)
-	}
-	return keys, nil
+	return s.db.listObjects(bucket)
 }
 
 func validBucketName(name string) bool {

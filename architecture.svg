@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="650" viewBox="0 0 1120 650" role="img" aria-labelledby="title desc">
+  <title id="title">单机对象存储的本地持久化架构</title>
+  <desc id="desc">调用方经过 s3.go 的函数接口与协调，分别访问 SQLite 元数据和磁盘对象文件。SQLite 记录桶、key 与内部文件名，文件目录保存对象字节。</desc>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#e8edf5" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-30%" width="150%" height="170%">
+      <feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#243b59" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3276c7"/>
+    </marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8065bd"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#228a70"/>
+    </marker>
+  </defs>
+
+  <rect width="1120" height="650" fill="#f8fafd"/>
+  <rect width="1120" height="650" fill="url(#grid)"/>
+  <text x="42" y="51" fill="#17334f" font-family="Noto Sans CJK SC, sans-serif" font-size="25" font-weight="700">本地持久化 · SQLite + 对象文件</text>
+  <text x="42" y="80" fill="#60718a" font-family="Noto Sans CJK SC, sans-serif" font-size="14">同一组函数接口，状态从内存转为 SQLite 元数据 + 本地对象文件</text>
+
+  <!-- Calling side -->
+  <rect x="42" y="143" width="246" height="377" rx="16" fill="#ffffff" stroke="#9ab5d6" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="42" y="143" width="246" height="53" rx="16" fill="#e7f0fb"/>
+  <rect x="42" y="177" width="246" height="19" fill="#e7f0fb"/>
+  <circle cx="69" cy="169" r="8" fill="#3276c7"/>
+  <text x="88" y="176" fill="#214c79" font-family="Noto Sans CJK SC, sans-serif" font-size="18" font-weight="700">调用方 / 测试</text>
+  <text x="65" y="230" fill="#3f536b" font-family="Noto Sans CJK SC, sans-serif" font-size="14">打开后调用 S3 的方法</text>
+  <g font-family="Noto Sans Mono CJK SC, monospace" font-size="13" fill="#254462">
+    <rect x="65" y="250" width="200" height="35" rx="7" fill="#f2f6fb"/>
+    <text x="78" y="273">Open() → *S3</text>
+    <rect x="65" y="294" width="200" height="35" rx="7" fill="#f2f6fb"/>
+    <text x="78" y="317">CreateBucket()</text>
+    <rect x="65" y="338" width="200" height="35" rx="7" fill="#f2f6fb"/>
+    <text x="78" y="361">PutObject() / GetObject()</text>
+    <rect x="65" y="382" width="200" height="35" rx="7" fill="#f2f6fb"/>
+    <text x="78" y="405">DeleteObject()</text>
+    <rect x="65" y="426" width="200" height="35" rx="7" fill="#f2f6fb"/>
+    <text x="78" y="449">ListObjects()</text>
+  </g>
+  <text x="65" y="491" fill="#60718a" font-family="Noto Sans CJK SC, sans-serif" font-size="12">s.Close() 后重开，状态仍在</text>
+
+  <!-- API and coordination -->
+  <rect x="359" y="143" width="309" height="377" rx="16" fill="#ffffff" stroke="#87a8d4" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="359" y="143" width="309" height="53" rx="16" fill="#dcebf9"/>
+  <rect x="359" y="177" width="309" height="19" fill="#dcebf9"/>
+  <text x="386" y="177" fill="#214c79" font-family="Noto Sans CJK SC, sans-serif" font-size="19" font-weight="700">s3.go</text>
+  <text x="513" y="176" fill="#537599" font-family="Noto Sans CJK SC, sans-serif" font-size="13">S3 方法与协调</text>
+  <rect x="383" y="221" width="260" height="71" rx="11" fill="#f3f7fc" stroke="#cedded"/>
+  <text x="400" y="246" fill="#315776" font-family="Noto Sans CJK SC, sans-serif" font-size="15" font-weight="700">保持原有行为</text>
+  <text x="400" y="272" fill="#516c85" font-family="Noto Sans CJK SC, sans-serif" font-size="13">校验名称、错误、切片独立性</text>
+  <rect x="383" y="307" width="260" height="79" rx="11" fill="#f3f7fc" stroke="#cedded"/>
+  <text x="400" y="333" fill="#315776" font-family="Noto Sans CJK SC, sans-serif" font-size="15" font-weight="700">协调一次对象操作</text>
+  <text x="400" y="359" fill="#516c85" font-family="Noto Sans CJK SC, sans-serif" font-size="13">查元数据 → 读文件</text>
+  <rect x="383" y="401" width="260" height="91" rx="11" fill="#edf6f3" stroke="#b7d9ce"/>
+  <text x="400" y="428" fill="#2a7865" font-family="Noto Sans CJK SC, sans-serif" font-size="15" font-weight="700">上传 / 覆盖</text>
+  <text x="400" y="454" fill="#426f63" font-family="Noto Sans CJK SC, sans-serif" font-size="13">新文件 → 更新记录</text>
+  <text x="400" y="476" fill="#426f63" font-family="Noto Sans CJK SC, sans-serif" font-size="13">覆盖后清理旧文件</text>
+
+  <!-- Data directory and its two components -->
+  <rect x="720" y="111" width="359" height="432" rx="18" fill="#f3f5fb" stroke="#b9c4db" stroke-width="2" stroke-dasharray="9 6"/>
+  <rect x="740" y="93" width="210" height="36" rx="10" fill="#556988"/>
+  <text x="757" y="117" fill="#ffffff" font-family="Noto Sans Mono CJK SC, monospace" font-size="15" font-weight="700">./data/ · 磁盘</text>
+
+  <rect x="743" y="151" width="312" height="170" rx="15" fill="#ffffff" stroke="#9b83c8" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="743" y="151" width="312" height="47" rx="15" fill="#eee9f8"/>
+  <rect x="743" y="182" width="312" height="16" fill="#eee9f8"/>
+  <ellipse cx="774" cy="175" rx="14" ry="6" fill="#8065bd"/>
+  <path d="M760 175v13c0 8 28 8 28 0v-13" fill="#8065bd"/>
+  <ellipse cx="774" cy="188" rx="14" ry="6" fill="#7259ae"/>
+  <text x="798" y="181" fill="#634b9c" font-family="Noto Sans CJK SC, sans-serif" font-size="18" font-weight="700">db.go · SQLite</text>
+  <text x="764" y="226" fill="#51436d" font-family="Noto Sans Mono CJK SC, monospace" font-size="13">metadata.db</text>
+  <line x1="764" y1="238" x2="1032" y2="238" stroke="#e2d9f0"/>
+  <text x="764" y="260" fill="#665b78" font-family="Noto Sans Mono CJK SC, monospace" font-size="12">buckets(name)</text>
+  <text x="764" y="282" fill="#665b78" font-family="Noto Sans Mono CJK SC, monospace" font-size="12">objects(bucket_name, key, file_name)</text>
+  <text x="764" y="304" fill="#807693" font-family="Noto Sans CJK SC, sans-serif" font-size="12">一条对象记录指向一个内容文件</text>
+
+  <rect x="743" y="353" width="312" height="170" rx="15" fill="#ffffff" stroke="#79b9a6" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="743" y="353" width="312" height="47" rx="15" fill="#e4f4ee"/>
+  <rect x="743" y="384" width="312" height="16" fill="#e4f4ee"/>
+  <path d="M760 374h10l4 5h17v16h-31z" fill="#2f9a7b"/>
+  <text x="802" y="383" fill="#237d64" font-family="Noto Sans CJK SC, sans-serif" font-size="18" font-weight="700">storage.go · diskv</text>
+  <text x="764" y="428" fill="#2f6d5e" font-family="Noto Sans Mono CJK SC, monospace" font-size="13">objects/</text>
+  <line x1="764" y1="440" x2="1032" y2="440" stroke="#d6ede4"/>
+  <text x="764" y="462" fill="#4b756a" font-family="Noto Sans CJK SC, sans-serif" font-size="13">文件名由内部生成</text>
+  <text x="764" y="486" fill="#4b756a" font-family="Noto Sans CJK SC, sans-serif" font-size="13">每个文件保存一份对象字节内容</text>
+
+  <!-- orthogonal connectors -->
+  <path d="M288 320 H359" fill="none" stroke="#3276c7" stroke-width="3" marker-end="url(#arrowBlue)"/>
+  <rect x="296" y="289" width="61" height="23" rx="6" fill="#e7f0fb"/>
+  <text x="304" y="305" fill="#3276c7" font-family="Noto Sans CJK SC, sans-serif" font-size="12">函数调用</text>
+  <path d="M668 272 H705 V236 H742" fill="none" stroke="#8065bd" stroke-width="3" marker-end="url(#arrowPurple)"/>
+  <rect x="667" y="202" width="68" height="23" rx="6" fill="#eee9f8"/>
+  <text x="674" y="218" fill="#735bad" font-family="Noto Sans CJK SC, sans-serif" font-size="12">元数据</text>
+  <path d="M668 447 H704 V438 H742" fill="none" stroke="#228a70" stroke-width="3" marker-end="url(#arrowGreen)"/>
+  <rect x="669" y="410" width="65" height="23" rx="6" fill="#e4f4ee"/>
+  <text x="676" y="426" fill="#228a70" font-family="Noto Sans CJK SC, sans-serif" font-size="12">字节内容</text>
+  <path d="M1030 321 V353" fill="none" stroke="#9a8caf" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrowPurple)"/>
+
+  <!-- footer legend / key insight -->
+  <rect x="42" y="562" width="1013" height="53" rx="12" fill="#eaf1fa" stroke="#cbd9e9"/>
+  <circle cx="70" cy="589" r="7" fill="#3276c7"/>
+  <text x="88" y="595" fill="#405976" font-family="Noto Sans CJK SC, sans-serif" font-size="14">桶和对象的行为不变</text>
+  <circle cx="290" cy="589" r="7" fill="#8065bd"/>
+  <text x="308" y="595" fill="#405976" font-family="Noto Sans CJK SC, sans-serif" font-size="14">SQLite 判断对象是否存在</text>
+  <circle cx="644" cy="589" r="7" fill="#228a70"/>
+  <text x="662" y="595" fill="#405976" font-family="Noto Sans CJK SC, sans-serif" font-size="14">本地文件保存对象内容</text>
+</svg>
