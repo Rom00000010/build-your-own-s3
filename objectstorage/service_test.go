@@ -1,12 +1,14 @@
-package s3
+package objectstorage
 
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"slices"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func testDataDir(t *testing.T) {
@@ -25,7 +27,7 @@ func testDataDir(t *testing.T) {
 	})
 }
 
-func openTestStore(t *testing.T) *S3 {
+func openTestStore(t *testing.T) *Service {
 	t.Helper()
 	testDataDir(t)
 	s, err := Open()
@@ -38,6 +40,19 @@ func openTestStore(t *testing.T) *S3 {
 		}
 	})
 	return s
+}
+
+// Open 失败测试策略：让工作目录中的 data 路径无法作为目录使用，
+// 检查返回 nil 实例和非 nil 错误。
+func TestOpenFailure(t *testing.T) {
+	testDataDir(t)
+	if err := os.WriteFile("data", []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open()
+	if s != nil || err == nil {
+		t.Fatalf("Open = (%v, %v)，期望 (nil, 非 nil 错误)", s, err)
+	}
 }
 
 // CreateBucket 测试策略：
@@ -148,15 +163,20 @@ func TestDeleteBucket(t *testing.T) {
 	if _, err := s.CreateBucket("full"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.PutObject("full", "a.txt", []byte("a")); err != nil {
+	if err := s.PutObject("full", "a.txt", strings.NewReader("a")); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DeleteBucket("full"); !errors.Is(err, BucketNotEmptyErr) {
 		t.Fatalf("删除非空桶 = %v", err)
 	}
-	content, err := s.GetObject("full", "a.txt")
-	if err != nil || string(content) != "a" {
-		t.Fatalf("删除失败后对象 = (%q, %v)", content, err)
+	stream, size, err := s.GetObject("full", "a.txt")
+	if err != nil {
+		t.Fatalf("删除失败后 GetObject = %v", err)
+	}
+	content, readErr := io.ReadAll(stream)
+	closeErr := stream.Close()
+	if size != 1 || readErr != nil || closeErr != nil || string(content) != "a" {
+		t.Fatalf("删除失败后对象 = (%q, %d, %v, %v)", content, size, readErr, closeErr)
 	}
 	if err := s.DeleteObject("full", "a.txt"); err != nil {
 		t.Fatal(err)
@@ -172,9 +192,9 @@ func TestDeleteBucket(t *testing.T) {
 
 // PutObject 测试策略：
 //   - 桶：存在、不存在；key：合法、空、首字符非法、过长。
-//   - 内容：非空、空切片、nil；对象：新 key、已有 key。
+//   - 内容：非空、空 Reader、读取中途失败；对象：新 key、已有 key。
 //
-// 成功时用 GetObject 检查内容，失败时检查对应错误。
+// 成功时用 GetObject 检查内容与大小；失败时检查原对象仍可读取。
 func TestPutObject(t *testing.T) {
 	s := openTestStore(t)
 
@@ -186,55 +206,83 @@ func TestPutObject(t *testing.T) {
 	t.Run("新 key 上传", func(t *testing.T) {
 		for _, key := range []string{"a", "note.txt", strings.Repeat("b", 255)} {
 			content := []byte("hello")
-			if err := s.PutObject(bucket, key, content); err != nil {
+			if err := s.PutObject(bucket, key, bytes.NewReader(content)); err != nil {
 				t.Fatalf("PutObject(%q) 返回错误：%v", key, err)
 			}
-			got, err := s.GetObject(bucket, key)
-			if err != nil || !bytes.Equal(got, content) {
-				t.Fatalf("GetObject(%q) = (%q, %v)，期望 (%q, nil)", key, got, err, content)
+			stream, size, err := s.GetObject(bucket, key)
+			if err != nil || stream == nil {
+				t.Fatalf("GetObject(%q) = (%v, %d, %v)", key, stream, size, err)
+			}
+			got, readErr := io.ReadAll(stream)
+			closeErr := stream.Close()
+			if readErr != nil || closeErr != nil || size != int64(len(content)) || !bytes.Equal(got, content) {
+				t.Fatalf("GetObject(%q) = (%q, %d, %v, %v)，期望 (%q, %d)", key, got, size, readErr, closeErr, content, len(content))
 			}
 		}
 	})
 
 	t.Run("同 key 覆盖", func(t *testing.T) {
 		const key = "overwrite.txt"
-		if err := s.PutObject(bucket, key, []byte("old-long-content")); err != nil {
+		if err := s.PutObject(bucket, key, strings.NewReader("old-long-content")); err != nil {
 			t.Fatalf("准备原对象失败：%v", err)
 		}
-		if err := s.PutObject(bucket, key, []byte("new")); err != nil {
+		if err := s.PutObject(bucket, key, strings.NewReader("new")); err != nil {
 			t.Fatalf("覆盖对象失败：%v", err)
 		}
-		got, err := s.GetObject(bucket, key)
-		if err != nil || !bytes.Equal(got, []byte("new")) {
-			t.Fatalf("覆盖后 GetObject = (%q, %v)，期望 (new, nil)", got, err)
+		stream, size, err := s.GetObject(bucket, key)
+		if err != nil || stream == nil {
+			t.Fatalf("覆盖后 GetObject = (%v, %d, %v)", stream, size, err)
+		}
+		got, readErr := io.ReadAll(stream)
+		closeErr := stream.Close()
+		if readErr != nil || closeErr != nil || size != 3 || !bytes.Equal(got, []byte("new")) {
+			t.Fatalf("覆盖后 GetObject = (%q, %d, %v, %v)，期望 new", got, size, readErr, closeErr)
+		}
+	})
+
+	t.Run("读取失败不覆盖原对象", func(t *testing.T) {
+		const key = "failed-overwrite.txt"
+		if err := s.PutObject(bucket, key, strings.NewReader("old")); err != nil {
+			t.Fatalf("准备原对象失败：%v", err)
+		}
+		broken := io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(errors.New("read failed")))
+		if err := s.PutObject(bucket, key, broken); err == nil {
+			t.Fatal("读取失败时 PutObject 应返回错误")
+		}
+		stream, size, err := s.GetObject(bucket, key)
+		if err != nil || stream == nil {
+			t.Fatalf("失败后 GetObject = (%v, %d, %v)", stream, size, err)
+		}
+		got, readErr := io.ReadAll(stream)
+		closeErr := stream.Close()
+		if readErr != nil || closeErr != nil || size != 3 || string(got) != "old" {
+			t.Fatalf("失败后 GetObject = (%q, %d, %v, %v)，期望 old", got, size, readErr, closeErr)
 		}
 	})
 
 	t.Run("桶不存在", func(t *testing.T) {
-		if err := s.PutObject("missing-put-bucket", "note.txt", []byte("hello")); !errors.Is(err, BucketNotExistErr) {
+		if err := s.PutObject("missing-put-bucket", "note.txt", strings.NewReader("hello")); !errors.Is(err, BucketNotExistErr) {
 			t.Fatalf("桶不存在时返回 %v，期望 BucketNotExistErr", err)
 		}
 	})
 
 	t.Run("非法 key", func(t *testing.T) {
 		for _, key := range []string{"", ".hidden", "a/b", strings.Repeat("c", 256)} {
-			if err := s.PutObject(bucket, key, []byte("hello")); !errors.Is(err, InvalidObjectKeyErr) {
+			if err := s.PutObject(bucket, key, strings.NewReader("hello")); !errors.Is(err, InvalidObjectKeyErr) {
 				t.Fatalf("PutObject(%q) 返回 %v，期望 InvalidObjectKeyErr", key, err)
 			}
 		}
 	})
 
 	t.Run("空内容", func(t *testing.T) {
-		for _, content := range [][]byte{nil, {}} {
-			if err := s.PutObject(bucket, "empty-content", content); !errors.Is(err, EmptyObjectErr) {
-				t.Fatalf("PutObject(%q, %v) 返回 %v，期望 EmptyObjectErr", "empty-content", content, err)
-			}
+		if err := s.PutObject(bucket, "empty-content", bytes.NewReader(nil)); !errors.Is(err, EmptyObjectErr) {
+			t.Fatalf("空 Reader 返回 %v，期望 EmptyObjectErr", err)
 		}
 	})
 }
 
 // GetObject 测试策略：桶存在或不存在；key 合法、非法或不存在。
-// 成功时检查内容，失败时检查 nil 和对应错误。
+// 成功时检查读取流、对象大小和内容，失败时检查 nil、0 和对应错误。
 func TestGetObject(t *testing.T) {
 	s := openTestStore(t)
 
@@ -244,35 +292,40 @@ func TestGetObject(t *testing.T) {
 	if _, err := s.CreateBucket(bucket); err != nil {
 		t.Fatalf("准备桶失败：%v", err)
 	}
-	if err := s.PutObject(bucket, key, content); err != nil {
+	if err := s.PutObject(bucket, key, bytes.NewReader(content)); err != nil {
 		t.Fatalf("准备对象失败：%v", err)
 	}
 
 	t.Run("对象存在", func(t *testing.T) {
-		got, err := s.GetObject(bucket, key)
-		if err != nil || !bytes.Equal(got, []byte("hello")) {
-			t.Fatalf("GetObject = (%q, %v)，期望 (hello, nil)", got, err)
+		stream, size, err := s.GetObject(bucket, key)
+		if err != nil || stream == nil {
+			t.Fatalf("GetObject = (%v, %d, %v)", stream, size, err)
+		}
+		got, readErr := io.ReadAll(stream)
+		closeErr := stream.Close()
+		if readErr != nil || closeErr != nil || size != 5 || !bytes.Equal(got, []byte("hello")) {
+			t.Fatalf("GetObject = (%q, %d, %v, %v)，期望 hello", got, size, readErr, closeErr)
 		}
 	})
 
 	t.Run("桶不存在", func(t *testing.T) {
-		got, err := s.GetObject("missing-get-bucket", key)
-		if got != nil || !errors.Is(err, BucketNotExistErr) {
-			t.Fatalf("GetObject = (%v, %v)，期望 (nil, BucketNotExistErr)", got, err)
+		stream, size, err := s.GetObject("missing-get-bucket", key)
+		if stream != nil || size != 0 || !errors.Is(err, BucketNotExistErr) {
+			t.Fatalf("GetObject = (%v, %d, %v)，期望 (nil, 0, BucketNotExistErr)", stream, size, err)
 		}
 	})
 
 	t.Run("非法 key", func(t *testing.T) {
-		got, err := s.GetObject(bucket, ".hidden")
-		if got != nil || !errors.Is(err, InvalidObjectKeyErr) {
-			t.Fatalf("GetObject = (%v, %v)，期望 (nil, InvalidObjectKeyErr)", got, err)
+		stream, size, err := s.GetObject(bucket, ".hidden")
+		if stream != nil || size != 0 || !errors.Is(err, InvalidObjectKeyErr) {
+			t.Fatalf("GetObject = (%v, %d, %v)，期望 (nil, 0, InvalidObjectKeyErr)", stream, size, err)
 		}
 	})
 
 	t.Run("对象不存在", func(t *testing.T) {
-		got, err := s.GetObject(bucket, "missing.txt")
-		if got != nil || !errors.Is(err, ObjectNotExistErr) {
-			t.Fatalf("GetObject = (%v, %v)，期望 (nil, ObjectNotExistErr)", got, err)
+		stream, size, err := s.GetObject(bucket, "missing.txt")
+		if stream != nil || size != 0 || !errors.Is(err, ObjectNotExistErr) {
+			t.Fatalf("GetObject = (%v, %d, %v)，期望 (nil, 0, ObjectNotExistErr)", stream, size, err)
 		}
 	})
 }
@@ -287,7 +340,7 @@ func TestDeleteObject(t *testing.T) {
 	if _, err := s.CreateBucket(bucket); err != nil {
 		t.Fatalf("准备桶失败：%v", err)
 	}
-	if err := s.PutObject(bucket, key, []byte("hello")); err != nil {
+	if err := s.PutObject(bucket, key, strings.NewReader("hello")); err != nil {
 		t.Fatalf("准备对象失败：%v", err)
 	}
 
@@ -295,9 +348,9 @@ func TestDeleteObject(t *testing.T) {
 		if err := s.DeleteObject(bucket, key); err != nil {
 			t.Fatalf("DeleteObject 返回错误：%v", err)
 		}
-		got, err := s.GetObject(bucket, key)
-		if got != nil || !errors.Is(err, ObjectNotExistErr) {
-			t.Fatalf("删除后 GetObject = (%v, %v)，期望 (nil, ObjectNotExistErr)", got, err)
+		stream, size, err := s.GetObject(bucket, key)
+		if stream != nil || size != 0 || !errors.Is(err, ObjectNotExistErr) {
+			t.Fatalf("删除后 GetObject = (%v, %d, %v)，期望 (nil, 0, ObjectNotExistErr)", stream, size, err)
 		}
 	})
 
@@ -339,7 +392,7 @@ func TestListObjects(t *testing.T) {
 
 	t.Run("多个对象", func(t *testing.T) {
 		for _, key := range []string{"a.txt", "b.txt"} {
-			if err := s.PutObject(bucket, key, []byte("data")); err != nil {
+			if err := s.PutObject(bucket, key, strings.NewReader("data")); err != nil {
 				t.Fatalf("准备对象 %q 失败：%v", key, err)
 			}
 		}
@@ -385,13 +438,13 @@ func TestPersistence(t *testing.T) {
 	if err := s.DeleteBucket("deleted-bucket"); err != nil {
 		t.Fatalf("删除待删除桶失败：%v", err)
 	}
-	if err := s.PutObject("files", "keep.txt", []byte("old")); err != nil {
+	if err := s.PutObject("files", "keep.txt", strings.NewReader("old")); err != nil {
 		t.Fatalf("上传对象失败：%v", err)
 	}
-	if err := s.PutObject("files", "keep.txt", []byte("new")); err != nil {
+	if err := s.PutObject("files", "keep.txt", strings.NewReader("new")); err != nil {
 		t.Fatalf("覆盖对象失败：%v", err)
 	}
-	if err := s.PutObject("files", "remove.txt", []byte("remove")); err != nil {
+	if err := s.PutObject("files", "remove.txt", strings.NewReader("remove")); err != nil {
 		t.Fatalf("上传待删除对象失败：%v", err)
 	}
 	if err := s.DeleteObject("files", "remove.txt"); err != nil {
@@ -419,13 +472,18 @@ func TestPersistence(t *testing.T) {
 	if err != nil || keys == nil || len(keys) != 0 {
 		t.Fatalf("重开后空桶 ListObjects = (%v, %v)，期望非 nil 空切片", keys, err)
 	}
-	got, err := s.GetObject("files", "keep.txt")
-	if err != nil || !bytes.Equal(got, []byte("new")) {
-		t.Fatalf("重开后 GetObject = (%q, %v)，期望 (new, nil)", got, err)
+	stream, size, err := s.GetObject("files", "keep.txt")
+	if err != nil || stream == nil {
+		t.Fatalf("重开后 GetObject = (%v, %d, %v)", stream, size, err)
 	}
-	got, err = s.GetObject("files", "remove.txt")
-	if got != nil || !errors.Is(err, ObjectNotExistErr) {
-		t.Fatalf("重开后已删除对象 GetObject = (%v, %v)，期望 (nil, ObjectNotExistErr)", got, err)
+	got, readErr := io.ReadAll(stream)
+	closeErr := stream.Close()
+	if readErr != nil || closeErr != nil || size != 3 || !bytes.Equal(got, []byte("new")) {
+		t.Fatalf("重开后 GetObject = (%q, %d, %v, %v)，期望 new", got, size, readErr, closeErr)
+	}
+	stream, size, err = s.GetObject("files", "remove.txt")
+	if stream != nil || size != 0 || !errors.Is(err, ObjectNotExistErr) {
+		t.Fatalf("重开后已删除对象 GetObject = (%v, %d, %v)，期望 (nil, 0, ObjectNotExistErr)", stream, size, err)
 	}
 	keys, err = s.ListObjects("files")
 	if err != nil || len(keys) != 1 || keys[0] != "keep.txt" {

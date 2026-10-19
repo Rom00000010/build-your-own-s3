@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="650" viewBox="0 0 1120 650" role="img" aria-labelledby="title desc">
   <title id="title">单机对象存储的本地持久化架构</title>
-  <desc id="desc">调用方经过 s3.go 的函数接口与协调，分别访问 SQLite 元数据和磁盘对象文件。SQLite 记录桶、key 与内部文件名，文件目录保存对象字节。</desc>
+  <desc id="desc">调用方经过 service.go 的函数接口与协调，分别访问 SQLite 元数据和磁盘对象文件。SQLite 记录桶、key 与内部文件名，文件目录保存对象字节。</desc>
   <defs>
     <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
       <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#e8edf5" stroke-width="1"/>
@@ -30,10 +30,10 @@
   <rect x="42" y="177" width="246" height="19" fill="#e7f0fb"/>
   <circle cx="69" cy="169" r="8" fill="#3276c7"/>
   <text x="88" y="176" fill="#214c79" font-family="Noto Sans CJK SC, sans-serif" font-size="18" font-weight="700">调用方 / 测试</text>
-  <text x="65" y="230" fill="#3f536b" font-family="Noto Sans CJK SC, sans-serif" font-size="14">打开后调用 S3 的方法</text>
+  <text x="65" y="230" fill="#3f536b" font-family="Noto Sans CJK SC, sans-serif" font-size="14">打开后调用 Service 的方法</text>
   <g font-family="Noto Sans Mono CJK SC, monospace" font-size="13" fill="#254462">
     <rect x="65" y="250" width="200" height="35" rx="7" fill="#f2f6fb"/>
-    <text x="78" y="273">Open() → *S3</text>
+    <text x="78" y="273">Open() → *Service</text>
     <rect x="65" y="294" width="200" height="35" rx="7" fill="#f2f6fb"/>
     <text x="78" y="317">CreateBucket()</text>
     <rect x="65" y="338" width="200" height="35" rx="7" fill="#f2f6fb"/>
@@ -49,8 +49,8 @@
   <rect x="359" y="143" width="309" height="377" rx="16" fill="#ffffff" stroke="#87a8d4" stroke-width="2" filter="url(#shadow)"/>
   <rect x="359" y="143" width="309" height="53" rx="16" fill="#dcebf9"/>
   <rect x="359" y="177" width="309" height="19" fill="#dcebf9"/>
-  <text x="386" y="177" fill="#214c79" font-family="Noto Sans CJK SC, sans-serif" font-size="19" font-weight="700">s3.go</text>
-  <text x="513" y="176" fill="#537599" font-family="Noto Sans CJK SC, sans-serif" font-size="13">S3 方法与协调</text>
+  <text x="386" y="177" fill="#214c79" font-family="Noto Sans CJK SC, sans-serif" font-size="19" font-weight="700">service.go</text>
+  <text x="513" y="176" fill="#537599" font-family="Noto Sans CJK SC, sans-serif" font-size="13">Service 方法与协调</text>
   <rect x="383" y="221" width="260" height="71" rx="11" fill="#f3f7fc" stroke="#cedded"/>
   <text x="400" y="246" fill="#315776" font-family="Noto Sans CJK SC, sans-serif" font-size="15" font-weight="700">保持原有行为</text>
   <text x="400" y="272" fill="#516c85" font-family="Noto Sans CJK SC, sans-serif" font-size="13">校验名称、错误、切片独立性</text>

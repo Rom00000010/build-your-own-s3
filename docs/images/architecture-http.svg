@@ -1,0 +1,205 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">第三步：HTTP 服务与流式对象存储架构</title>
+  <desc id="desc">客户端通过 HTTP 访问本机服务。服务入口打开存储并监听，HTTP handler 路由请求并转换响应，Service 串行协调 SQLite 元数据与 diskv 对象文件。下方分别展示流式上传和下载。</desc>
+  <defs>
+    <linearGradient id="background" x2="0" y2="1">
+      <stop offset="0" stop-color="#f1f6fc"/>
+      <stop offset="1" stop-color="#f9fbfe"/>
+    </linearGradient>
+    <linearGradient id="masthead" x2="1" y2="0">
+      <stop offset="0" stop-color="#153a60"/>
+      <stop offset="0.58" stop-color="#205583"/>
+      <stop offset="1" stop-color="#287393"/>
+    </linearGradient>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#dce8f3"/>
+    </pattern>
+    <filter id="shadow" x="-15%" y="-20%" width="135%" height="150%">
+      <feDropShadow dx="0" dy="5" stdDeviation="10" flood-color="#143958" flood-opacity="0.11"/>
+    </filter>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#2e80b6"/>
+    </marker>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#159c97"/>
+    </marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#7469ba"/>
+    </marker>
+    <style>
+      text { font-family: "Noto Sans CJK SC", "Noto Sans", sans-serif; }
+      .mono { font-family: "Noto Sans Mono CJK SC", "DejaVu Sans Mono", monospace; }
+      .label { font-size: 15px; font-weight: 700; fill: #31516f; }
+      .body { font-size: 14px; fill: #526a80; }
+      .small { font-size: 12px; fill: #6d8295; }
+      .card { fill: #ffffff; stroke: #d8e4ef; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1040" fill="url(#background)"/>
+  <rect y="130" width="1600" height="910" fill="url(#dots)" opacity="0.56"/>
+  <rect width="1600" height="126" fill="url(#masthead)"/>
+  <text x="60" y="57" font-size="30" font-weight="700" fill="#ffffff">第三步 · HTTP 服务与流式对象存储</text>
+  <text x="60" y="93" font-size="16" fill="#d5e7f6">请求在 HTTP 层解析，业务由 Service 协调，元数据与对象字节分别持久化</text>
+  <rect x="1270" y="38" width="270" height="51" rx="25" fill="#ffffff" opacity="0.15" stroke="#bddbe9" stroke-width="1.5"/>
+  <circle cx="1302" cy="64" r="7" fill="#91e6dc"/>
+  <text x="1322" y="70" font-size="15" font-weight="600" fill="#ffffff">本机 · 串行存储操作</text>
+
+  <!-- Client -->
+  <rect x="58" y="180" width="285" height="568" rx="20" class="card" filter="url(#shadow)"/>
+  <path d="M78 180h245a20 20 0 0 1 20 20v56H58v-56a20 20 0 0 1 20-20Z" fill="#e3effb"/>
+  <circle cx="88" cy="218" r="16" fill="#357abb"/>
+  <path d="M81 218h14m-7-7v14" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round"/>
+  <text x="114" y="226" font-size="21" font-weight="700" fill="#21557f">客户端</text>
+  <text x="80" y="285" class="body">只通过 HTTP 访问服务</text>
+  <text x="80" y="316" class="small">S3 路径式 URL · 简单响应格式</text>
+  <rect x="78" y="344" width="245" height="53" rx="10" fill="#f2f7fc"/>
+  <rect x="89" y="356" width="53" height="27" rx="6" fill="#e8f3ff"/>
+  <text x="101" y="375" class="mono" font-size="13" font-weight="700" fill="#3070aa">PUT</text>
+  <text x="153" y="375" class="mono" font-size="13" fill="#405d77">/{bucket}</text>
+  <rect x="78" y="406" width="245" height="53" rx="10" fill="#f2f7fc"/>
+  <rect x="89" y="418" width="53" height="27" rx="6" fill="#e8f3ff"/>
+  <text x="101" y="437" class="mono" font-size="13" font-weight="700" fill="#3070aa">GET</text>
+  <text x="153" y="437" class="mono" font-size="13" fill="#405d77">/{bucket}</text>
+  <rect x="78" y="468" width="245" height="77" rx="10" fill="#eaf7f6"/>
+  <text x="91" y="497" class="mono" font-size="13" font-weight="700" fill="#178b88">PUT / GET / DELETE</text>
+  <text x="91" y="525" class="mono" font-size="13" fill="#3d6774">/{bucket}/{key}</text>
+  <line x1="79" y1="580" x2="322" y2="580" stroke="#d9e6f1"/>
+  <text x="80" y="614" class="label">对象体逐段传输</text>
+  <text x="80" y="642" class="body">上传：请求体 → 服务端</text>
+  <text x="80" y="668" class="body">下载：服务端 → 响应体</text>
+  <rect x="78" y="694" width="245" height="35" rx="9" fill="#eff5fb"/>
+  <text x="94" y="717" class="small">127.0.0.1:8080 · 无认证</text>
+
+  <!-- Server envelope -->
+  <rect x="388" y="160" width="1153" height="608" rx="25" fill="#f7fbff" stroke="#bcd1e4" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="388" y="160" width="1153" height="69" rx="25" fill="#dcebf7"/>
+  <rect x="388" y="205" width="1153" height="24" fill="#dcebf7"/>
+  <rect x="414" y="179" width="34" height="34" rx="10" fill="#346c9f"/>
+  <path d="M424 189h14m-14 6h14m-14 6h9" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+  <text x="461" y="205" font-size="21" font-weight="700" fill="#214d73">服务进程</text>
+  <text x="596" y="205" font-size="14" fill="#526f87">main.go · HTTP handler · Service · 本地持久化</text>
+  <rect x="1320" y="178" width="192" height="33" rx="16" fill="#eef7fd" stroke="#b6d3e5"/>
+  <text x="1341" y="200" font-size="13" font-weight="600" fill="#326b92">对外仅暴露 HTTP</text>
+
+  <!-- Lifecycle band -->
+  <rect x="420" y="252" width="1090" height="118" rx="16" fill="#ffffff" stroke="#d8e4ee" stroke-width="1.5"/>
+  <text x="446" y="282" class="label">启动与关闭</text>
+  <rect x="446" y="300" width="280" height="50" rx="10" fill="#eff5fb"/>
+  <circle cx="468" cy="325" r="13" fill="#3a7eb5"/>
+  <text x="463" y="330" font-size="13" font-weight="700" fill="#ffffff">1</text>
+  <text x="490" y="320" font-size="14" font-weight="700" fill="#315b7b">Open 当前目录 data/</text>
+  <text x="490" y="339" class="small">初始化含 size 的元数据</text>
+  <path d="M728 325h30" fill="none" stroke="#8eafcb" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <rect x="763" y="300" width="272" height="50" rx="10" fill="#eff7f7"/>
+  <circle cx="785" cy="325" r="13" fill="#239b97"/>
+  <text x="780" y="330" font-size="13" font-weight="700" fill="#ffffff">2</text>
+  <text x="808" y="320" font-size="14" font-weight="700" fill="#2d706f">建立 HTTP handler</text>
+  <text x="808" y="339" class="small">注入已打开的 Service 实例</text>
+  <path d="M1037 325h30" fill="none" stroke="#8eafcb" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <rect x="1072" y="300" width="408" height="50" rx="10" fill="#f1f1fa"/>
+  <circle cx="1094" cy="325" r="13" fill="#756bb4"/>
+  <text x="1089" y="330" font-size="13" font-weight="700" fill="#ffffff">3</text>
+  <text x="1118" y="320" font-size="14" font-weight="700" fill="#57528a">监听 127.0.0.1:8080</text>
+  <text x="1118" y="339" class="small">SIGINT / SIGTERM → 等待请求 → Close</text>
+
+  <!-- HTTP card -->
+  <rect x="420" y="397" width="302" height="325" rx="17" class="card" filter="url(#shadow)"/>
+  <path d="M437 397h268a17 17 0 0 1 17 17v43H420v-43a17 17 0 0 1 17-17Z" fill="#dff4f2"/>
+  <circle cx="449" cy="426" r="11" fill="#269d98"/>
+  <circle cx="449" cy="426" r="3" fill="#ffffff"/>
+  <text x="470" y="433" font-size="19" font-weight="700" fill="#19746f">HTTP 层</text>
+  <text x="442" y="485" class="mono" font-size="14" font-weight="700" fill="#2e6f70">httpserver/api.go</text>
+  <line x1="441" y1="502" x2="700" y2="502" stroke="#d7e9e8"/>
+  <text x="442" y="537" class="body">按方法和路径分派七种操作</text>
+  <text x="442" y="570" class="body">提取 bucket、key；请求体直通</text>
+  <text x="442" y="603" class="body">成功 → 状态码 / JSON / 原始字节</text>
+  <text x="442" y="636" class="body">错误 → 状态码 + JSON 错误名</text>
+  <rect x="441" y="666" width="259" height="36" rx="9" fill="#ecf8f7"/>
+  <text x="456" y="690" font-size="13" font-weight="700" fill="#258681">不直接访问 SQLite 或 diskv</text>
+
+  <!-- Service card -->
+  <rect x="770" y="397" width="320" height="325" rx="17" class="card" filter="url(#shadow)"/>
+  <path d="M787 397h286a17 17 0 0 1 17 17v43H770v-43a17 17 0 0 1 17-17Z" fill="#ecebfa"/>
+  <rect x="798" y="414" width="23" height="23" rx="6" fill="#7569b6"/>
+  <path d="M804 422h11m-11 7h11" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+  <text x="835" y="433" font-size="19" font-weight="700" fill="#5a5097">核心服务</text>
+  <text x="794" y="485" class="mono" font-size="14" font-weight="700" fill="#665c9c">service.go</text>
+  <line x1="793" y1="502" x2="1067" y2="502" stroke="#e1def2"/>
+  <text x="794" y="537" class="body">校验参数，协调七种操作</text>
+  <text x="794" y="570" class="body">Put：写新文件后切换记录</text>
+  <text x="794" y="603" class="body">Get：返回读取流与实际大小</text>
+  <text x="794" y="636" class="body">失败时保持原对象可见</text>
+  <rect x="793" y="666" width="273" height="36" rx="9" fill="#f2f0fb"/>
+  <text x="807" y="690" font-size="13" font-weight="700" fill="#7166ab">存储操作按请求串行执行</text>
+
+  <!-- Persistence card -->
+  <rect x="1138" y="397" width="370" height="325" rx="17" class="card" filter="url(#shadow)"/>
+  <path d="M1155 397h336a17 17 0 0 1 17 17v43h-370v-43a17 17 0 0 1 17-17Z" fill="#e8eef4"/>
+  <path d="M1166 420c0-8 24-8 24 0v13c0 8-24 8-24 0Z" fill="#637e98"/>
+  <ellipse cx="1178" cy="420" rx="12" ry="5" fill="#7f9bb3"/>
+  <text x="1205" y="433" font-size="19" font-weight="700" fill="#3c5974">持久化层</text>
+  <rect x="1161" y="472" width="324" height="101" rx="12" fill="#f2effa" stroke="#ded8ee"/>
+  <circle cx="1182" cy="494" r="6" fill="#8569b4"/>
+  <text x="1197" y="500" font-size="15" font-weight="700" fill="#5b4c87">db.go · SQLite</text>
+  <text x="1178" y="527" class="mono" font-size="12.5" fill="#625878">bucket · key · file_name · size</text>
+  <text x="1178" y="552" class="small">文件名和大小在对象记录中一起更新</text>
+  <rect x="1161" y="589" width="324" height="111" rx="12" fill="#eaf7f1" stroke="#c9e6d7"/>
+  <path d="M1177 611h13l5 6h19v14h-37Z" fill="#38a780"/>
+  <text x="1225" y="627" font-size="15" font-weight="700" fill="#2f8061">storage.go · diskv</text>
+  <text x="1178" y="655" class="mono" font-size="12.5" fill="#477461">随机内部名称 · 对象文件</text>
+  <text x="1178" y="680" class="small">关闭内存缓存 · 统一流式读取</text>
+
+  <!-- Inter-layer connectors -->
+  <path d="M344 487h69" fill="none" stroke="#2e80b6" stroke-width="3" marker-end="url(#arrowBlue)"/>
+  <text x="353" y="470" class="small" fill="#2e80b6">请求</text>
+  <path d="M414 575h-69" fill="none" stroke="#159c97" stroke-width="3" marker-end="url(#arrowTeal)"/>
+  <text x="353" y="602" class="small" fill="#159c97">响应</text>
+  <path d="M723 530h40" fill="none" stroke="#159c97" stroke-width="3" marker-end="url(#arrowTeal)"/>
+  <path d="M1091 530h40" fill="none" stroke="#7469ba" stroke-width="3" marker-end="url(#arrowPurple)"/>
+  <path d="M1091 644h40" fill="none" stroke="#7469ba" stroke-width="3" marker-end="url(#arrowPurple)"/>
+
+  <!-- Upload flow -->
+  <rect x="58" y="798" width="723" height="202" rx="19" fill="#ffffff" stroke="#cde3e7" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="80" y="818" width="84" height="32" rx="16" fill="#dff3f1"/>
+  <text x="103" y="840" font-size="15" font-weight="700" fill="#168a86">上传</text>
+  <text x="178" y="840" font-size="15" font-weight="700" fill="#31536e">PUT /{bucket}/{key}</text>
+  <rect x="79" y="865" width="146" height="65" rx="10" fill="#eef6fc"/>
+  <text x="95" y="892" class="mono" font-size="13" font-weight="700" fill="#326b96">r.Body</text>
+  <text x="95" y="914" class="small">逐段读取</text>
+  <path d="M226 897h20" stroke="#72a8bd" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <rect x="251" y="865" width="146" height="65" rx="10" fill="#e9f8f2"/>
+  <text x="267" y="892" font-size="13" font-weight="700" fill="#2e8061">diskv 新文件</text>
+  <text x="267" y="914" class="small">逐段写入并计数</text>
+  <path d="M398 897h20" stroke="#72a8bd" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <rect x="423" y="865" width="146" height="65" rx="10" fill="#fff5e9"/>
+  <text x="439" y="892" font-size="13" font-weight="700" fill="#9a652c">检查对象内容</text>
+  <text x="439" y="914" class="small">内容非空</text>
+  <path d="M570 897h20" stroke="#72a8bd" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <rect x="595" y="865" width="162" height="65" rx="10" fill="#f1effa"/>
+  <text x="611" y="892" font-size="13" font-weight="700" fill="#665493">SQLite 更新记录</text>
+  <text x="611" y="914" class="small">文件名 + size</text>
+  <text x="80" y="969" font-size="13" fill="#7f6759">失败时清理新文件；新对象不可见，覆盖时旧对象仍可读</text>
+
+  <!-- Download flow -->
+  <rect x="818" y="798" width="723" height="202" rx="19" fill="#ffffff" stroke="#d8d7ee" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="840" y="818" width="84" height="32" rx="16" fill="#eeeafa"/>
+  <text x="863" y="840" font-size="15" font-weight="700" fill="#6f61ad">下载</text>
+  <text x="938" y="840" font-size="15" font-weight="700" fill="#31536e">GET /{bucket}/{key}</text>
+  <rect x="839" y="865" width="146" height="65" rx="10" fill="#f1effa"/>
+  <text x="855" y="892" font-size="13" font-weight="700" fill="#655391">SQLite 查元数据</text>
+  <text x="855" y="914" class="small">文件名 + size</text>
+  <path d="M986 897h20" stroke="#9892c2" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  <rect x="1011" y="865" width="146" height="65" rx="10" fill="#e9f8f2"/>
+  <text x="1027" y="892" font-size="13" font-weight="700" fill="#2e8061">读取对象内容</text>
+  <text x="1027" y="914" class="small">diskv 无缓存流</text>
+  <path d="M1158 897h20" stroke="#9892c2" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  <rect x="1183" y="865" width="146" height="65" rx="10" fill="#eef6fc"/>
+  <text x="1199" y="892" class="mono" font-size="12.5" font-weight="700" fill="#326b96">ReadCloser</text>
+  <text x="1199" y="914" class="small">返回流 + 大小</text>
+  <path d="M1330 897h20" stroke="#9892c2" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  <rect x="1355" y="865" width="162" height="65" rx="10" fill="#eef6fc"/>
+  <text x="1371" y="892" font-size="13" font-weight="700" fill="#326b96">HTTP 响应体</text>
+  <text x="1371" y="914" class="small">逐段发送</text>
+  <text x="840" y="969" font-size="13" fill="#6c658c">统一关闭 diskv 内存缓存；逐段读取对象，Content-Length 来自 SQLite</text>
+</svg>
