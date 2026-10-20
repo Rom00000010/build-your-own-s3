@@ -27,9 +27,12 @@ func run() (err error) {
 	}
 	defer func() { err = errors.Join(err, service.Close()) }()
 
+	handler := http.NewServeMux()
+	handler.Handle("GET /_ui/", http.StripPrefix("/_ui/", http.FileServer(http.Dir("web"))))
+	handler.Handle("/", httpserver.NewHandler(service))
 	server := &http.Server{
 		Addr:    "127.0.0.1:8080",
-		Handler: httpserver.NewHandler(service),
+		Handler: handler,
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
