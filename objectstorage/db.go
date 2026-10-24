@@ -3,6 +3,7 @@ package objectstorage
 import (
 	"database/sql"
 	"errors"
+	"net/url"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -12,14 +13,20 @@ type objectDB struct {
 }
 
 func openObjectDB(path string) (*objectDB, error) {
-	conn, err := sql.Open("sqlite3", path)
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: url.Values{
+		"_busy_timeout": {"5000"},
+		"_foreign_keys": {"on"},
+		"_journal_mode": {"WAL"},
+		"_txlock":       {"immediate"},
+	}.Encode()}).String()
+	conn, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
-	conn.SetMaxOpenConns(1)
+	conn.SetMaxOpenConns(4)
+	conn.SetMaxIdleConns(4)
 
 	for _, statement := range []string{
-		`PRAGMA foreign_keys = ON`,
 		`CREATE TABLE IF NOT EXISTS buckets (
 			name TEXT PRIMARY KEY
 		)`,
@@ -73,14 +80,33 @@ func (db *objectDB) listBuckets() ([]string, error) {
 	return names, nil
 }
 
-func (db *objectDB) deleteEmptyBucket(name string) (bool, error) {
-	result, err := db.conn.Exec(`DELETE FROM buckets WHERE name = ?
+func (db *objectDB) deleteEmptyBucket(name string) (deleted, exists bool, err error) {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return false, false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`DELETE FROM buckets WHERE name = ?
 		AND NOT EXISTS (SELECT 1 FROM objects WHERE bucket_name = ?)`, name, name)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	n, err := result.RowsAffected()
-	return n == 1, err
+	if err != nil {
+		return false, false, err
+	}
+	if n == 0 {
+		var found int
+		err = tx.QueryRow(`SELECT 1 FROM buckets WHERE name = ?`, name).Scan(&found)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, false, err
+		}
+		exists = err == nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, false, err
+	}
+	return n == 1, exists, nil
 }
 
 func (db *objectDB) bucketExists(name string) (bool, error) {
@@ -92,44 +118,98 @@ func (db *objectDB) bucketExists(name string) (bool, error) {
 	return err == nil, err
 }
 
-func (db *objectDB) objectFile(bucket, key string) (string, int64, bool, error) {
-	var name string
-	var size int64
-	err := db.conn.QueryRow(`SELECT file_name, size FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key).Scan(&name, &size)
+func (db *objectDB) objectFile(bucket, key string) (string, int64, bool, bool, error) {
+	var name sql.NullString
+	var size sql.NullInt64
+	err := db.conn.QueryRow(`SELECT o.file_name, o.size FROM buckets AS b
+		LEFT JOIN objects AS o ON o.bucket_name = b.name AND o.key = ?
+		WHERE b.name = ?`, key, bucket).Scan(&name, &size)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", 0, false, nil
+		return "", 0, false, false, nil
 	}
-	return name, size, err == nil, err
-}
-
-func (db *objectDB) setObjectFile(bucket, key, name string, size int64) error {
-	_, err := db.conn.Exec(`INSERT INTO objects(bucket_name, key, file_name, size) VALUES (?, ?, ?, ?)
-		ON CONFLICT(bucket_name, key) DO UPDATE SET file_name = excluded.file_name, size = excluded.size`, bucket, key, name, size)
-	return err
-}
-
-func (db *objectDB) deleteObject(bucket, key string) error {
-	_, err := db.conn.Exec(`DELETE FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key)
-	return err
-}
-
-func (db *objectDB) listObjects(bucket string) ([]string, error) {
-	rows, err := db.conn.Query(`SELECT key FROM objects WHERE bucket_name = ?`, bucket)
 	if err != nil {
-		return nil, err
+		return "", 0, false, false, err
+	}
+	return name.String, size.Int64, true, name.Valid, nil
+}
+
+func (db *objectDB) setObjectFile(bucket, key, name string, size int64) (string, bool, error) {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+	var old sql.NullString
+	err = tx.QueryRow(`SELECT o.file_name FROM buckets AS b
+		LEFT JOIN objects AS o ON o.bucket_name = b.name AND o.key = ?
+		WHERE b.name = ?`, key, bucket).Scan(&old)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	_, err = tx.Exec(`INSERT INTO objects(bucket_name, key, file_name, size) VALUES (?, ?, ?, ?)
+		ON CONFLICT(bucket_name, key) DO UPDATE SET file_name = excluded.file_name, size = excluded.size`, bucket, key, name, size)
+	if err != nil {
+		return "", false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	return old.String, true, nil
+}
+
+func (db *objectDB) deleteObject(bucket, key string) (string, bool, error) {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+	var name sql.NullString
+	err = tx.QueryRow(`SELECT o.file_name FROM buckets AS b
+		LEFT JOIN objects AS o ON o.bucket_name = b.name AND o.key = ?
+		WHERE b.name = ?`, key, bucket).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if name.Valid {
+		if _, err := tx.Exec(`DELETE FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key); err != nil {
+			return "", false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	return name.String, true, nil
+}
+
+func (db *objectDB) listObjects(bucket string) ([]string, bool, error) {
+	rows, err := db.conn.Query(`SELECT o.key FROM buckets AS b
+		LEFT JOIN objects AS o ON o.bucket_name = b.name
+		WHERE b.name = ?`, bucket)
+	if err != nil {
+		return nil, false, err
 	}
 	defer rows.Close()
 
 	keys := make([]string, 0)
+	exists := false
 	for rows.Next() {
-		var key string
+		exists = true
+		var key sql.NullString
 		if err := rows.Scan(&key); err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		keys = append(keys, key)
+		if key.Valid {
+			keys = append(keys, key.String)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return keys, nil
+	return keys, exists, nil
 }

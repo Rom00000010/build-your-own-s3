@@ -76,16 +76,12 @@ func (s *Service) ListBuckets() ([]string, error) {
 
 // DeleteBucket 删除空桶；桶不存在或非空时返回对应错误。
 func (s *Service) DeleteBucket(name string) error {
-	deleted, err := s.db.deleteEmptyBucket(name)
+	deleted, exists, err := s.db.deleteEmptyBucket(name)
 	if err != nil {
 		return err
 	}
 	if deleted {
 		return nil
-	}
-	exists, err := s.db.bucketExists(name)
-	if err != nil {
-		return err
 	}
 	if !exists {
 		return BucketNotExistErr
@@ -105,10 +101,6 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 	if !validObjectKey(key) {
 		return InvalidObjectKeyErr
 	}
-	oldName, _, _, err := s.db.objectFile(bucket, key)
-	if err != nil {
-		return err
-	}
 	// 先写新文件，再切换元数据；文件写入失败时，原对象仍可读取。
 	newName, size, err := s.files.write(object)
 	if err != nil {
@@ -118,9 +110,14 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 		_ = s.files.remove(newName)
 		return EmptyObjectErr
 	}
-	if err := s.db.setObjectFile(bucket, key, newName, size); err != nil {
+	oldName, bucketExists, err := s.db.setObjectFile(bucket, key, newName, size)
+	if err != nil {
 		_ = s.files.remove(newName)
 		return err
+	}
+	if !bucketExists {
+		_ = s.files.remove(newName)
+		return BucketNotExistErr
 	}
 	// 元数据已指向新文件；旧文件清理失败不影响这次上传的结果。
 	if oldName != "" {
@@ -131,21 +128,17 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 
 // GetObject 返回对象读取流及大小；调用方负责关闭读取流。
 func (s *Service) GetObject(bucket string, key string) (io.ReadCloser, int64, error) {
-	exists, err := s.db.bucketExists(bucket)
+	name, size, bucketExists, objectExists, err := s.db.objectFile(bucket, key)
 	if err != nil {
 		return nil, 0, err
 	}
-	if !exists {
+	if !bucketExists {
 		return nil, 0, BucketNotExistErr
 	}
 	if !validObjectKey(key) {
 		return nil, 0, InvalidObjectKeyErr
 	}
-	name, size, exists, err := s.db.objectFile(bucket, key)
-	if err != nil {
-		return nil, 0, err
-	}
-	if !exists {
+	if !objectExists {
 		return nil, 0, ObjectNotExistErr
 	}
 	stream, err := s.files.read(name)
@@ -167,15 +160,15 @@ func (s *Service) DeleteObject(bucket string, key string) error {
 	if !validObjectKey(key) {
 		return InvalidObjectKeyErr
 	}
-	name, _, exists, err := s.db.objectFile(bucket, key)
+	name, bucketExists, err := s.db.deleteObject(bucket, key)
 	if err != nil {
 		return err
 	}
-	if !exists {
-		return nil
+	if !bucketExists {
+		return BucketNotExistErr
 	}
-	if err := s.db.deleteObject(bucket, key); err != nil {
-		return err
+	if name == "" {
+		return nil
 	}
 	// 元数据已删除；文件清理失败不影响对象对调用方的可见状态。
 	_ = s.files.remove(name)
@@ -184,14 +177,14 @@ func (s *Service) DeleteObject(bucket string, key string) error {
 
 // ListObjects 返回桶内全部 key，顺序不作保证；空桶返回非 nil 的空切片。
 func (s *Service) ListObjects(bucket string) ([]string, error) {
-	exists, err := s.db.bucketExists(bucket)
+	keys, exists, err := s.db.listObjects(bucket)
 	if err != nil {
 		return nil, err
 	}
 	if !exists {
 		return nil, BucketNotExistErr
 	}
-	return s.db.listObjects(bucket)
+	return keys, nil
 }
 
 func validBucketName(name string) bool {
