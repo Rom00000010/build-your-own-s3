@@ -10,6 +10,6 @@
 8. **代码保持简单、层次清晰。** 高层表达业务流程，底层封装实现细节；函数只承担同一层级的职责。优先直接实现，同一业务规则尽量只在一处维护；仅在真实重复且变化原因相同时抽取共用代码。
 9. **注释保持精简。** 代码优先靠命名表达意图。导出接口的注释简述契约，内部注释只解释不易看出的原因或约束，不逐行复述代码。
 10. **完成前自查。** 对照规格检查测试策略、用例和代码是否一致；做与改动相称的格式及测试检查，准确报告通过、失败与未验证部分。
-11. **提交信息参考历史。** 提交前查看近期提交信息，参考其语言、风格和粒度，准确概括本次改动；
+11. **分支和提交命名。** 分支名使用简短的小写形式 `type/subject`，单词用连字符分隔；功能、修复和文档分别使用 `feat/`、`fix/`、`docs/`，例如 `feat/concurrency`。提交信息使用 git-cz 的 Conventional Commits 格式：`type(scope): subject`，其中 `scope` 可省略；按改动选择 `feat`、`fix`、`docs`、`test`、`refactor`、`chore` 等类型，主题简短、准确。提交前检查近期提交和本次差异，每个提交只包含一个可审查的阶段。
 
 延伸参考：Royce 的 [Managing the Development of Large Software Systems](https://cpske.github.io/ISP/resources/Royce1970-Managing-the-Development-of-Large-Software-Systems.pdf)（Step 3: Do It Twice）；MIT 6.102（2026 年春季）的 [Specifications](https://web.mit.edu/6.102/www/sp26/classes/04-specifications/)、[Testing](https://web.mit.edu/6.102/www/sp26/classes/02-testing/) 和 [Code Review](https://web.mit.edu/6.102/www/sp26/classes/03-code-review/)。
