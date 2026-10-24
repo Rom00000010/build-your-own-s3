@@ -21,6 +21,7 @@ var (
 type Service struct {
 	db    *objectDB
 	files *objectStorage
+	locks objectLockTable
 }
 
 // Open 打开当前工作目录下 data 中的存储；首次打开时创建空存储。
@@ -110,7 +111,9 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 		_ = s.files.remove(newName)
 		return EmptyObjectErr
 	}
+	unlock := s.locks.acquire(bucket, key, true)
 	oldName, bucketExists, err := s.db.setObjectFile(bucket, key, newName, size)
+	unlock()
 	if err != nil {
 		_ = s.files.remove(newName)
 		return err
@@ -128,6 +131,8 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 
 // GetObject 返回对象读取流及大小；调用方负责关闭读取流。
 func (s *Service) GetObject(bucket string, key string) (io.ReadCloser, int64, error) {
+	unlock := s.locks.acquire(bucket, key, false)
+	defer unlock()
 	name, size, bucketExists, objectExists, err := s.db.objectFile(bucket, key)
 	if err != nil {
 		return nil, 0, err
@@ -160,7 +165,9 @@ func (s *Service) DeleteObject(bucket string, key string) error {
 	if !validObjectKey(key) {
 		return InvalidObjectKeyErr
 	}
+	unlock := s.locks.acquire(bucket, key, true)
 	name, bucketExists, err := s.db.deleteObject(bucket, key)
+	unlock()
 	if err != nil {
 		return err
 	}
