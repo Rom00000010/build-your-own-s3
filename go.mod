@@ -3,6 +3,7 @@ module build_your_own_s3
 go 1.25.0
 
 require (
+	github.com/anishathalye/porcupine v1.3.1
 	github.com/mattn/go-sqlite3 v1.14.52
 	gocloud.dev v0.46.0
 )
