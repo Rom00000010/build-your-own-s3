@@ -36,6 +36,7 @@ func Open() (*Service, error) {
 	}
 	db, err := openObjectDB(filepath.Join(dataDir, "metadata.db"))
 	if err != nil {
+		_ = files.close()
 		return nil, err
 	}
 	return &Service{db: db, files: files}, nil
@@ -50,7 +51,7 @@ func (s *Service) Close() error {
 		return err
 	}
 	s.db = nil
-	return nil
+	return s.files.close()
 }
 
 // CreateBucket 创建空桶，成功时返回桶名；名称不合法或已存在时返回对应错误。
