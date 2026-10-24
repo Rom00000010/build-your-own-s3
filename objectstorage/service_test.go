@@ -6,9 +6,11 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 func testDataDir(t *testing.T) {
@@ -187,6 +189,83 @@ func TestDeleteBucket(t *testing.T) {
 	names, err := s.ListBuckets()
 	if err != nil || len(names) != 0 {
 		t.Fatalf("删除后桶列表 = (%v, %v)", names, err)
+	}
+}
+
+// 上传与删桶测试策略：让 PUT 在读取内容时暂停，先删除仍为空的桶；
+// PUT 随后不能发布对象，应返回桶不存在。
+func TestPutObjectAfterConcurrentDeleteBucket(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.CreateBucket("photos"); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	putDone := make(chan error, 1)
+	go func() { putDone <- s.PutObject("photos", "a", reader) }()
+	if _, err := writer.Write([]byte("content")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteBucket("photos"); err != nil {
+		t.Fatalf("上传尚未结束时删除空桶：%v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-putDone:
+		if !errors.Is(err, BucketNotExistErr) {
+			t.Fatalf("删桶后 PUT = %v，期望 BucketNotExistErr", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PUT 未结束")
+	}
+	names, err := s.ListBuckets()
+	if err != nil || len(names) != 0 {
+		t.Fatalf("最终桶列表 = (%v, %v)，期望空列表", names, err)
+	}
+}
+
+// 不同 key 上传测试策略：同时开始多次上传；每次均应成功，最终列表包含所有 key。
+func TestConcurrentPutDifferentKeys(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.CreateBucket("photos"); err != nil {
+		t.Fatal(err)
+	}
+	const count = 8
+	start := make(chan struct{})
+	results := make(chan error, count)
+	for i := range count {
+		key := "file" + strconv.Itoa(i)
+		go func() {
+			<-start
+			results <- s.PutObject("photos", key, strings.NewReader(key))
+		}()
+	}
+	close(start)
+	var firstErr error
+	for range count {
+		select {
+		case err := <-results:
+			if firstErr == nil {
+				firstErr = err
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("并发上传未结束")
+		}
+	}
+	if firstErr != nil {
+		t.Fatalf("并发上传返回错误：%v", firstErr)
+	}
+	keys, err := s.ListObjects("photos")
+	if err != nil || len(keys) != count {
+		t.Fatalf("对象列表 = (%v, %v)，期望 %d 个 key", keys, err, count)
+	}
+	for i := range count {
+		key := "file" + strconv.Itoa(i)
+		if !slices.Contains(keys, key) {
+			t.Fatalf("对象列表缺少 %q：%v", key, keys)
+		}
 	}
 }
 
