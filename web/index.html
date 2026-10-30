@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>S3</title>
+  <link rel="icon" type="image/svg+xml" href="/_ui/bucket.svg">
+  <link rel="stylesheet" href="/_ui/style.css">
+  <script src="/_ui/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <img class="logo" src="/_ui/bucket.svg" alt="">
+      <h1>S3</h1>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <p id="page-error" class="error-message" role="alert" hidden></p>
+
+    <section id="buckets-view" aria-labelledby="buckets-heading">
+      <div class="page-heading">
+        <h2 id="buckets-heading">存储桶</h2>
+      </div>
+
+      <div class="panel">
+        <div class="panel-heading">
+          <h3>所有存储桶</h3>
+          <span class="count" id="bucket-count"></span>
+          <button id="create-bucket" class="primary-button panel-heading-button" type="button">创建桶</button>
+        </div>
+        <div class="list-header">
+          <span>名称</span>
+          <span>操作</span>
+        </div>
+        <ul id="bucket-list" class="item-list">
+          <li id="bucket-empty" class="empty-state" hidden>暂无存储桶</li>
+        </ul>
+        <template id="bucket-item-template">
+          <li>
+            <button class="item-name" type="button" data-action="open"></button>
+            <button class="danger-button" type="button" data-action="delete">删除</button>
+          </li>
+        </template>
+      </div>
+    </section>
+
+    <section id="objects-view" aria-labelledby="objects-heading" hidden>
+      <button id="back" class="back-button" type="button">返回桶列表</button>
+      <div class="page-heading">
+        <h2 id="objects-heading"></h2>
+        <span class="count" id="object-count"></span>
+      </div>
+
+      <div class="panel">
+        <div class="panel-heading">
+          <h3>对象</h3>
+          <button id="open-upload" class="primary-button panel-heading-button" type="button">上传文件</button>
+        </div>
+        <div class="list-header">
+          <span>名称</span>
+          <span>操作</span>
+        </div>
+        <ul id="object-list" class="item-list">
+          <li id="object-empty" class="empty-state" hidden>暂无对象</li>
+        </ul>
+        <template id="object-item-template">
+          <li>
+            <span class="item-name"></span>
+            <button type="button" data-action="download">下载</button>
+            <button class="danger-button" type="button" data-action="delete">删除</button>
+          </li>
+        </template>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="create-dialog" class="modal" aria-labelledby="create-title">
+    <form id="create-form" novalidate>
+      <h2 id="create-title">创建存储桶</h2>
+      <p class="dialog-description">为新存储桶填写一个名称。</p>
+      <p class="dialog-error error-message" role="alert" hidden></p>
+      <div class="form-field">
+        <label for="bucket-name">桶名</label>
+        <input id="bucket-name" type="text" autocomplete="off" placeholder="例如 photos" aria-describedby="bucket-name-error">
+        <p id="bucket-name-error" class="field-error" aria-live="polite" hidden></p>
+      </div>
+      <div class="dialog-actions">
+        <button class="cancel-button" type="button">取消</button>
+        <button id="submit-bucket" class="primary-button" type="submit">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="upload-dialog" class="modal" aria-labelledby="upload-title">
+    <form id="upload-form" novalidate>
+      <h2 id="upload-title">上传文件</h2>
+      <p class="dialog-description">文件名将直接作为对象 key。</p>
+      <p class="dialog-error error-message" role="alert" hidden></p>
+      <div class="form-field">
+        <label for="file">文件</label>
+        <div class="file-picker">
+          <input id="file" type="file" aria-describedby="file-error">
+          <span class="file-picker-button" aria-hidden="true">选择文件</span>
+          <span id="selected-file-name" class="selected-file-name">未选择文件</span>
+        </div>
+        <p id="file-error" class="field-error" aria-live="polite" hidden></p>
+      </div>
+      <div class="dialog-actions">
+        <button class="cancel-button" type="button">取消</button>
+        <button id="upload" class="primary-button" type="submit">上传</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog" class="modal" aria-labelledby="delete-title" aria-describedby="delete-description">
+    <h2 id="delete-title"></h2>
+    <p id="delete-description" class="dialog-description"></p>
+    <div class="dialog-actions">
+      <button class="cancel-button" type="button">取消</button>
+      <button id="confirm-delete" class="danger-button" type="button">确认删除</button>
+    </div>
+  </dialog>
+</body>
+</html>
