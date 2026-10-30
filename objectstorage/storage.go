@@ -1,8 +1,9 @@
-package s3
+package objectstorage
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"os"
 
 	"github.com/peterbourgon/diskv/v3"
@@ -21,26 +22,38 @@ func openObjectStorage(dir string) (*objectStorage, error) {
 	})}, nil
 }
 
-func (storage *objectStorage) write(content []byte) (string, error) {
+type countingReader struct {
+	io.Reader
+	size int64
+}
+
+func (reader *countingReader) Read(p []byte) (int, error) {
+	n, err := reader.Reader.Read(p)
+	reader.size += int64(n)
+	return n, err
+}
+
+func (storage *objectStorage) write(content io.Reader) (string, int64, error) {
 	// 碰撞时生成新的内部名称，避免覆盖现有内容文件。
 	for {
 		var id [16]byte
 		if _, err := rand.Read(id[:]); err != nil {
-			return "", err
+			return "", 0, err
 		}
 		name := hex.EncodeToString(id[:])
 		if storage.disk.Has(name) {
 			continue
 		}
-		if err := storage.disk.Write(name, content); err != nil {
-			return "", err
+		reader := &countingReader{Reader: content}
+		if err := storage.disk.WriteStream(name, reader, false); err != nil {
+			return "", 0, err
 		}
-		return name, nil
+		return name, reader.size, nil
 	}
 }
 
-func (storage *objectStorage) read(name string) ([]byte, error) {
-	return storage.disk.Read(name)
+func (storage *objectStorage) read(name string) (io.ReadCloser, error) {
+	return storage.disk.ReadStream(name, true)
 }
 
 func (storage *objectStorage) remove(name string) error {

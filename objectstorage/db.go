@@ -1,4 +1,4 @@
-package s3
+package objectstorage
 
 import (
 	"database/sql"
@@ -27,6 +27,7 @@ func openObjectDB(path string) (*objectDB, error) {
 			bucket_name TEXT NOT NULL,
 			key TEXT NOT NULL,
 			file_name TEXT NOT NULL UNIQUE,
+			size INTEGER NOT NULL,
 			PRIMARY KEY (bucket_name, key),
 			FOREIGN KEY (bucket_name) REFERENCES buckets(name)
 		)`,
@@ -91,18 +92,19 @@ func (db *objectDB) bucketExists(name string) (bool, error) {
 	return err == nil, err
 }
 
-func (db *objectDB) objectFile(bucket, key string) (string, bool, error) {
+func (db *objectDB) objectFile(bucket, key string) (string, int64, bool, error) {
 	var name string
-	err := db.conn.QueryRow(`SELECT file_name FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key).Scan(&name)
+	var size int64
+	err := db.conn.QueryRow(`SELECT file_name, size FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key).Scan(&name, &size)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return "", 0, false, nil
 	}
-	return name, err == nil, err
+	return name, size, err == nil, err
 }
 
-func (db *objectDB) setObjectFile(bucket, key, name string) error {
-	_, err := db.conn.Exec(`INSERT INTO objects(bucket_name, key, file_name) VALUES (?, ?, ?)
-		ON CONFLICT(bucket_name, key) DO UPDATE SET file_name = excluded.file_name`, bucket, key, name)
+func (db *objectDB) setObjectFile(bucket, key, name string, size int64) error {
+	_, err := db.conn.Exec(`INSERT INTO objects(bucket_name, key, file_name, size) VALUES (?, ?, ?, ?)
+		ON CONFLICT(bucket_name, key) DO UPDATE SET file_name = excluded.file_name, size = excluded.size`, bucket, key, name, size)
 	return err
 }
 
