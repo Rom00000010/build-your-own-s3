@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"sync"
 
 	"build_your_own_s3/objectstorage"
 )
@@ -24,7 +23,6 @@ type objectService interface {
 type handler struct {
 	service objectService
 	mux     *http.ServeMux
-	mu      sync.Mutex
 }
 
 // NewHandler 将 HTTP 请求映射到七个对象存储操作。
@@ -42,9 +40,6 @@ func NewHandler(service objectService) http.Handler {
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	h.mux.ServeHTTP(w, r)
 }
 

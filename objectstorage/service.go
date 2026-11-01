@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 var (
@@ -18,8 +19,9 @@ var (
 
 // Service 表示一份已打开的对象存储。关闭后不能继续使用该实例。
 type Service struct {
-	db    *objectDB
-	files *objectStorage
+	db          *objectDB
+	files       *objectStorage
+	objectLocks sync.Map // map[[2]string]*sync.Mutex
 }
 
 // Open 打开当前工作目录下 data 中的存储；首次打开时创建空存储。
@@ -35,6 +37,7 @@ func Open() (*Service, error) {
 	}
 	db, err := openObjectDB(filepath.Join(dataDir, "metadata.db"))
 	if err != nil {
+		_ = files.close()
 		return nil, err
 	}
 	return &Service{db: db, files: files}, nil
@@ -45,11 +48,9 @@ func (s *Service) Close() error {
 	if s.db == nil {
 		return errors.New("store is not open")
 	}
-	if err := s.db.close(); err != nil {
-		return err
-	}
+	err := errors.Join(s.db.close(), s.files.close())
 	s.db = nil
-	return nil
+	return err
 }
 
 // CreateBucket 创建空桶，成功时返回桶名；名称不合法或已存在时返回对应错误。
@@ -93,6 +94,10 @@ func (s *Service) DeleteBucket(name string) error {
 
 // PutObject 上传对象；同一 key 已存在时，完整替换原内容。
 func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
+	mu := s.objectMutex(bucket, key)
+	mu.Lock()
+	defer mu.Unlock()
+
 	exists, err := s.db.bucketExists(bucket)
 	if err != nil {
 		return err
@@ -125,6 +130,10 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 
 // GetObject 返回对象读取流及大小；调用方负责关闭读取流。
 func (s *Service) GetObject(bucket string, key string) (io.ReadCloser, int64, error) {
+	mu := s.objectMutex(bucket, key)
+	mu.Lock()
+	defer mu.Unlock()
+
 	exists, err := s.db.bucketExists(bucket)
 	if err != nil {
 		return nil, 0, err
@@ -151,6 +160,10 @@ func (s *Service) GetObject(bucket string, key string) (io.ReadCloser, int64, er
 
 // DeleteObject 删除对象；key 不存在时也返回 nil。
 func (s *Service) DeleteObject(bucket string, key string) error {
+	mu := s.objectMutex(bucket, key)
+	mu.Lock()
+	defer mu.Unlock()
+
 	exists, err := s.db.bucketExists(bucket)
 	if err != nil {
 		return err
@@ -186,6 +199,12 @@ func (s *Service) ListObjects(bucket string) ([]string, error) {
 		return nil, BucketNotExistErr
 	}
 	return s.db.listObjects(bucket)
+}
+
+// objectMutex 返回同一对象共用的互斥锁，锁项随 Service 实例保留。
+func (s *Service) objectMutex(bucket, key string) *sync.Mutex {
+	mu, _ := s.objectLocks.LoadOrStore([2]string{bucket, key}, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 func validBucketName(name string) bool {

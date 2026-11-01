@@ -7,7 +7,7 @@
 | 路径 | 内容 |
 | --- | --- |
 | `main.go` | 程序入口：装配存储服务与 HTTP 处理器，监听 `127.0.0.1:8080` |
-| `objectstorage/` | 桶与对象的核心操作，以及 SQLite + diskv 的本地持久化 |
+| `objectstorage/` | 桶与对象的核心操作，并发协调以及 SQLite + FileBlob 的本地持久化 |
 | `httpserver/` | HTTP 层，把操作映射成路由并负责流式读写 |
 | `web/` | 挂在 `/_ui/` 下的前端静态资源|
 | `docs/` | `ADT.md` 数据模型、`specification.md` 规格、`design.md` 设计文档 |

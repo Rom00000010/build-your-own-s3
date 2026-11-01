@@ -2,6 +2,8 @@
 
 存储接口由 `build_your_own_s3/objectstorage` 包提供。
 
+并发约定见[总规格的“并发”一节](../specification.md#并发)。
+
 ### 启动、关闭与持久化
 
 调用方通过 `Open` 获得 `Service` 实例，调用其方法操作存储，并在使用结束后调用 `Close`。

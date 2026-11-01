@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http/httptest"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"build_your_own_s3/objectstorage"
 )
@@ -119,6 +121,68 @@ func TestHTTPErrorMapping(t *testing.T) {
 	}
 }
 
+// HTTP 并发测试策略：让 Service stub 暂停第一个对象请求，
+// 检查 HTTP 层仍允许另一个 key 的请求完成；对象数据行为由 Service 测试覆盖。
+func TestHTTPAllowsConcurrentObjectRequests(t *testing.T) {
+	entered, resume := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	handler := NewHandler(&stubService{
+		putObject: func(bucket, key string, content io.Reader) error {
+			if key == "first.txt" {
+				close(entered)
+				<-resume
+			}
+			return nil
+		},
+	})
+
+	startUpload := func(key string) (*httptest.ResponseRecorder, <-chan struct{}) {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest("PUT", "/photos/"+key, nil)
+		done := make(chan struct{})
+		go func() {
+			handler.ServeHTTP(response, request)
+			close(done)
+		}()
+		t.Cleanup(func() {
+			release()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("清理测试时上传请求仍未结束")
+			}
+		})
+		return response, done
+	}
+	waitUpload := func(done <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("上传请求未能在 5 秒内完成")
+		}
+	}
+
+	first, firstDone := startUpload("first.txt")
+	select {
+	case <-entered:
+	case <-firstDone:
+		t.Fatalf("调用 Service 前上传已返回 HTTP %d", first.Code)
+	case <-time.After(5 * time.Second):
+		t.Fatal("第一个请求未调用 Service")
+	}
+	second, secondDone := startUpload("second.txt")
+	waitUpload(secondDone)
+	if second.Code != 204 || second.Body.Len() != 0 {
+		t.Fatalf("另一个 key 的上传响应 = HTTP %d, %q，期望 204、空响应体", second.Code, second.Body.String())
+	}
+	release()
+	waitUpload(firstDone)
+	if first.Code != 204 || first.Body.Len() != 0 {
+		t.Fatalf("第一个上传响应 = HTTP %d, %q，期望 204、空响应体", first.Code, first.Body.String())
+	}
+}
+
 func requireResponse(t *testing.T, response *httptest.ResponseRecorder, mediaType, body string) {
 	t.Helper()
 	if response.Header().Get("Content-Type") != mediaType {
@@ -159,6 +223,7 @@ type stubService struct {
 	names                  []string
 	stream                 *trackedStream
 	size                   int64
+	putObject              func(string, string, io.Reader) error
 }
 
 func (s *stubService) record(operation, bucket, key string) error {
@@ -176,6 +241,9 @@ func (s *stubService) DeleteBucket(name string) error {
 	return s.record("DeleteBucket", name, "")
 }
 func (s *stubService) PutObject(bucket, key string, content io.Reader) error {
+	if s.putObject != nil {
+		return s.putObject(bucket, key, content)
+	}
 	if err := s.record("PutObject", bucket, key); err != nil {
 		return err
 	}

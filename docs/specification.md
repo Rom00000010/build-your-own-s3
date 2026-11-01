@@ -42,4 +42,10 @@
 - **桶列表**：包含全部桶名，每个只出现一次，顺序不保证；没有桶时返回 `{"buckets":[]}`。
 - **删除桶**：仅能删除空桶；桶不存在时返回 `BucketNotExist`，非空时返回 `BucketNotEmpty`。失败时状态不变。
 
+### 并发
+
+- **对象操作**：对象由 `(bucket, key)` 标识。不同对象的 `PutObject`、`GetObject`、`DeleteObject` 可以并行；同一对象的这些操作由服务端串行处理。
+- **对象列表**：`ListObjects` 可以与对象上传、下载和删除并行；返回请求执行期间某一时刻的完整 key 列表，不保证包含与该请求重叠的上传或删除结果。
+- **桶操作**：`CreateBucket`、`ListBuckets`、`DeleteBucket` 不支持彼此并发，也不支持与对象操作（含 `ListObjects`）并发。调用方须避免这些请求重叠；违反此前提时，行为不作保证。
+
 内部spec见 [存储服务规格](service/specification.md)。

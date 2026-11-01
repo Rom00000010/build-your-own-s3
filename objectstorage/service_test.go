@@ -422,10 +422,18 @@ func requireObjectContent(t *testing.T, s *Service, bucket, key string, want []b
 	if err != nil || stream == nil {
 		t.Fatalf("GetObject(%q, %q) = (%v, %d, %v)", bucket, key, stream, size, err)
 	}
+	requireStreamContent(t, stream, size, want)
+}
+
+func requireStreamContent(t *testing.T, stream io.ReadCloser, size int64, want []byte) {
+	t.Helper()
+	if stream == nil {
+		t.Fatal("读取流不能为 nil")
+	}
 	got, readErr := io.ReadAll(stream)
 	closeErr := stream.Close()
 	if readErr != nil || closeErr != nil || size != int64(len(want)) || !bytes.Equal(got, want) {
-		t.Fatalf("GetObject(%q, %q) = (%q, %d, %v, %v)，期望 (%q, %d)", bucket, key, got, size, readErr, closeErr, want, len(want))
+		t.Fatalf("读取结果 = (%q, %d, %v, %v)，期望 (%q, %d)", got, size, readErr, closeErr, want, len(want))
 	}
 }
 
