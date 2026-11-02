@@ -2,6 +2,7 @@ package objectstorage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -9,6 +10,11 @@ import (
 
 type objectDB struct {
 	conn *sql.DB
+}
+
+type objectFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 func openObjectDB(path string) (*objectDB, error) {
@@ -26,7 +32,7 @@ func openObjectDB(path string) (*objectDB, error) {
 		`CREATE TABLE IF NOT EXISTS objects (
 			bucket_name TEXT NOT NULL,
 			key TEXT NOT NULL,
-			file_name TEXT NOT NULL UNIQUE,
+			files TEXT NOT NULL,
 			size INTEGER NOT NULL,
 			PRIMARY KEY (bucket_name, key),
 			FOREIGN KEY (bucket_name) REFERENCES buckets(name)
@@ -92,19 +98,30 @@ func (db *objectDB) bucketExists(name string) (bool, error) {
 	return err == nil, err
 }
 
-func (db *objectDB) objectFile(bucket, key string) (string, int64, bool, error) {
-	var name string
+func (db *objectDB) getObject(bucket, key string) ([]objectFile, int64, bool, error) {
+	var data string
 	var size int64
-	err := db.conn.QueryRow(`SELECT file_name, size FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key).Scan(&name, &size)
+	err := db.conn.QueryRow(`SELECT files, size FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key).Scan(&data, &size)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", 0, false, nil
+		return nil, 0, false, nil
 	}
-	return name, size, err == nil, err
+	if err != nil {
+		return nil, 0, false, err
+	}
+	var files []objectFile
+	if err := json.Unmarshal([]byte(data), &files); err != nil {
+		return nil, 0, false, err
+	}
+	return files, size, true, nil
 }
 
-func (db *objectDB) setObjectFile(bucket, key, name string, size int64) error {
-	_, err := db.conn.Exec(`INSERT INTO objects(bucket_name, key, file_name, size) VALUES (?, ?, ?, ?)
-		ON CONFLICT(bucket_name, key) DO UPDATE SET file_name = excluded.file_name, size = excluded.size`, bucket, key, name, size)
+func (db *objectDB) setObject(bucket, key string, files []objectFile, size int64) error {
+	data, err := json.Marshal(files)
+	if err != nil {
+		return err
+	}
+	_, err = db.conn.Exec(`INSERT INTO objects(bucket_name, key, files, size) VALUES (?, ?, ?, ?)
+		ON CONFLICT(bucket_name, key) DO UPDATE SET files = excluded.files, size = excluded.size`, bucket, key, string(data), size)
 	return err
 }
 

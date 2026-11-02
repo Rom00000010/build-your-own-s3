@@ -108,7 +108,7 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 	if !validObjectKey(key) {
 		return InvalidObjectKeyErr
 	}
-	oldName, _, _, err := s.db.objectFile(bucket, key)
+	oldFiles, _, _, err := s.db.getObject(bucket, key)
 	if err != nil {
 		return err
 	}
@@ -117,14 +117,12 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 	if err != nil {
 		return err
 	}
-	if err := s.db.setObjectFile(bucket, key, newName, size); err != nil {
+	if err := s.db.setObject(bucket, key, []objectFile{{Name: newName, Size: size}}, size); err != nil {
 		_ = s.files.remove(newName)
 		return err
 	}
 	// 元数据已指向新文件；旧文件清理失败不影响这次上传的结果。
-	if oldName != "" {
-		_ = s.files.remove(oldName)
-	}
+	_ = s.files.removeFiles(oldFiles)
 	return nil
 }
 
@@ -144,14 +142,14 @@ func (s *Service) GetObject(bucket string, key string) (io.ReadCloser, int64, er
 	if !validObjectKey(key) {
 		return nil, 0, InvalidObjectKeyErr
 	}
-	name, size, exists, err := s.db.objectFile(bucket, key)
+	files, size, exists, err := s.db.getObject(bucket, key)
 	if err != nil {
 		return nil, 0, err
 	}
 	if !exists {
 		return nil, 0, ObjectNotExistErr
 	}
-	stream, err := s.files.read(name)
+	stream, err := s.files.read(files)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -174,7 +172,7 @@ func (s *Service) DeleteObject(bucket string, key string) error {
 	if !validObjectKey(key) {
 		return InvalidObjectKeyErr
 	}
-	name, _, exists, err := s.db.objectFile(bucket, key)
+	files, _, exists, err := s.db.getObject(bucket, key)
 	if err != nil {
 		return err
 	}
@@ -185,7 +183,7 @@ func (s *Service) DeleteObject(bucket string, key string) error {
 		return err
 	}
 	// 元数据已删除；文件清理失败不影响对象对调用方的可见状态。
-	_ = s.files.remove(name)
+	_ = s.files.removeFiles(files)
 	return nil
 }
 

@@ -118,18 +118,40 @@ func TestServiceSameObjectCallsWait(t *testing.T) {
 	}
 }
 
-// 读取流测试策略：读取一部分后覆盖或删除同一对象。
+// 读取流测试策略：单文件和多文件对象，读取一部分后覆盖或删除同一对象。
 // 检查后续方法无需等待流关闭，原流仍返回原版本的剩余内容和大小。
 func TestServiceOpenStreamKeepsVersion(t *testing.T) {
-	for _, operation := range []string{"覆盖", "删除"} {
-		t.Run(operation, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, operation string
+		contents        []string
+	}{
+		{"单文件覆盖", "覆盖", []string{"old-content"}},
+		{"单文件删除", "删除", []string{"old-content"}},
+		{"多文件覆盖", "覆盖", []string{"old-", "content"}},
+		{"多文件删除", "删除", []string{"old-", "content"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			s := setupTestStore(t)
 			if _, err := s.CreateBucket("photos"); err != nil {
 				t.Fatal(err)
 			}
-			const original = "old-content"
-			if err := s.PutObject("photos", "note.txt", strings.NewReader(original)); err != nil {
-				t.Fatal(err)
+			original := strings.Join(tc.contents, "")
+			if len(tc.contents) == 1 {
+				if err := s.PutObject("photos", "note.txt", strings.NewReader(original)); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var files []objectFile
+				for _, content := range tc.contents {
+					name, size, err := s.files.write(strings.NewReader(content))
+					if err != nil {
+						t.Fatal(err)
+					}
+					files = append(files, objectFile{Name: name, Size: size})
+				}
+				if err := s.db.setObject("photos", "note.txt", files, int64(len(original))); err != nil {
+					t.Fatal(err)
+				}
 			}
 			stream, size, err := s.GetObject("photos", "note.txt")
 			if err != nil {
@@ -147,7 +169,7 @@ func TestServiceOpenStreamKeepsVersion(t *testing.T) {
 			})
 			go func() {
 				defer close(change)
-				if operation == "覆盖" {
+				if tc.operation == "覆盖" {
 					change <- s.PutObject("photos", "note.txt", strings.NewReader("new"))
 				} else {
 					change <- s.DeleteObject("photos", "note.txt")
@@ -158,7 +180,7 @@ func TestServiceOpenStreamKeepsVersion(t *testing.T) {
 			if err != nil || string(prefix)+string(rest) != original || size != int64(len(original)) {
 				t.Fatalf("原流 = (%q, %d, %v)，期望 (%q, %d, nil)", string(prefix)+string(rest), size, err, original, len(original))
 			}
-			if operation == "覆盖" {
+			if tc.operation == "覆盖" {
 				requireObjectContent(t, s, "photos", "note.txt", []byte("new"))
 			} else {
 				requireServiceObjectMissing(t, s, "photos", "note.txt")

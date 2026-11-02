@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"io"
 
 	"gocloud.dev/blob"
@@ -64,14 +65,48 @@ func (storage *objectStorage) write(content io.Reader) (string, int64, error) {
 	}
 }
 
-func (storage *objectStorage) read(name string) (io.ReadCloser, error) {
-	return storage.bucket.NewReader(context.Background(), name, nil)
+func (storage *objectStorage) read(files []objectFile) (io.ReadCloser, error) {
+	stream := &objectReader{}
+	readers := make([]io.Reader, 0, len(files))
+	// 先打开全部文件，保证后续覆盖或删除对象不影响当前读取流。
+	for _, file := range files {
+		reader, err := storage.bucket.NewReader(context.Background(), file.Name, nil)
+		if err != nil {
+			_ = stream.Close()
+			return nil, err
+		}
+		stream.readers = append(stream.readers, reader)
+		readers = append(readers, reader)
+	}
+	stream.Reader = io.MultiReader(readers...)
+	return stream, nil
+}
+
+type objectReader struct {
+	io.Reader
+	readers []io.ReadCloser
+}
+
+func (reader *objectReader) Close() error {
+	var err error
+	for _, stream := range reader.readers {
+		err = errors.Join(err, stream.Close())
+	}
+	return err
 }
 
 func (storage *objectStorage) remove(name string) error {
 	err := storage.bucket.Delete(context.Background(), name)
 	if gcerrors.Code(err) == gcerrors.NotFound {
 		return nil
+	}
+	return err
+}
+
+func (storage *objectStorage) removeFiles(files []objectFile) error {
+	var err error
+	for _, file := range files {
+		err = errors.Join(err, storage.remove(file.Name))
 	}
 	return err
 }
