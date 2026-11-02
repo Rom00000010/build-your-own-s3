@@ -55,8 +55,8 @@
 
 ### 并发
 
-- **对象操作**：对象由 `(bucket, key)` 标识。不同对象的 `PutObject`、`GetObject`、`DeleteObject` 可以并行；同一对象的这些操作由服务端串行处理。
-- **对象列表**：`ListObjects` 可以与对象上传、下载和删除并行；返回请求执行期间某一时刻的完整 key 列表，不保证包含与该请求重叠的上传或删除结果。
-- **桶操作**：`CreateBucket`、`ListBuckets`、`DeleteBucket` 不支持彼此并发，也不支持与对象操作（含 `ListObjects`）并发。调用方须避免这些请求重叠；违反此前提时，行为不作保证。
+- **对象与分片操作**：对象由 `(bucket, key)` 标识。不同对象的 `PutObject`、`GetObject`、`DeleteObject`、`CompleteMultipartUpload` 可以并行；同一对象的这些操作由服务端串行处理。分片由 `(uploadId, partNumber)` 标识，不同分片的 `UploadPart` 可以并行，同一分片的上传由服务端串行处理。调用方须避免 `CompleteMultipartUpload` 与同任务的其他分片请求重叠；违反此前提时，行为不作保证。
+- **列表**：在其他并发前提满足时，`ListObjects` 和 `ListParts` 可以与上述操作并行；分别返回请求执行期间某一时刻的完整 key 列表或已保存分片列表，不保证包含与该请求重叠的变更。
+- **桶与任务管理**：`CreateBucket`、`ListBuckets`、`DeleteBucket`、`CreateMultipartUpload`、`AbortMultipartUpload` 不支持彼此并发，也不支持与上述操作并发。调用方须避免这些请求重叠；违反此前提时，行为不作保证。
 
 内部spec见 [存储服务规格](service/specification.md)。

@@ -10,7 +10,7 @@ import (
 )
 
 // 不同对象测试策略：同桶不同 key、不同桶相同 key。
-// 暂停一个对象的上传，检查另一个对象仍能完成上传、读取和删除。
+// 暂停一个对象的上传，检查另一个对象仍能完成普通上传、分片发布、读取和删除。
 func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
 	for _, tc := range []struct {
 		name, bucket, key string
@@ -25,7 +25,9 @@ func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			release, upload := pauseServiceUpload(t, s, "photos", "note.txt", "first")
+			id := createTestUpload(t, s, tc.bucket, tc.key, 1)
+			uploadTestPart(t, s, tc.bucket, tc.key, id, 1, []byte("other"))
+			release, upload := pauseServiceUpload(t, s, "photos", "note.txt", "", 0, "first")
 			other := make(chan error, 1)
 			var stream io.ReadCloser
 			var size int64
@@ -39,6 +41,10 @@ func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
 			go func() {
 				defer close(other)
 				if err := s.PutObject(tc.bucket, tc.key, strings.NewReader("other")); err != nil {
+					other <- err
+					return
+				}
+				if err := s.CompleteMultipartUpload(tc.bucket, tc.key, id); err != nil {
 					other <- err
 					return
 				}
@@ -59,10 +65,10 @@ func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
 	}
 }
 
-// 同一对象测试策略：上传执行中，分别再调用上传、读取和删除。
+// 同一对象测试策略：上传执行中，分别再调用上传、读取、删除和完成分片上传。
 // 用输入流暂停前一次上传，检查后一次调用等待，且完成后的结果符合串行执行。
 func TestServiceSameObjectCallsWait(t *testing.T) {
-	for _, operation := range []string{"PutObject", "GetObject", "DeleteObject"} {
+	for _, operation := range []string{"PutObject", "GetObject", "DeleteObject", "CompleteMultipartUpload"} {
 		t.Run(operation, func(t *testing.T) {
 			s := setupTestStore(t)
 			if _, err := s.CreateBucket("photos"); err != nil {
@@ -71,7 +77,12 @@ func TestServiceSameObjectCallsWait(t *testing.T) {
 			if err := s.PutObject("photos", "note.txt", strings.NewReader("old")); err != nil {
 				t.Fatal(err)
 			}
-			release, upload := pauseServiceUpload(t, s, "photos", "note.txt", "first")
+			var id string
+			if operation == "CompleteMultipartUpload" {
+				id = createTestUpload(t, s, "photos", "note.txt", 1)
+				uploadTestPart(t, s, "photos", "note.txt", id, 1, []byte("second"))
+			}
+			release, upload := pauseServiceUpload(t, s, "photos", "note.txt", "", 0, "first")
 			started := make(chan struct{})
 			next := make(chan error, 1)
 			var stream io.ReadCloser
@@ -93,6 +104,8 @@ func TestServiceSameObjectCallsWait(t *testing.T) {
 					var err error
 					stream, size, err = s.GetObject("photos", "note.txt")
 					next <- err
+				case "CompleteMultipartUpload":
+					next <- s.CompleteMultipartUpload("photos", "note.txt", id)
 				default:
 					next <- s.DeleteObject("photos", "note.txt")
 				}
@@ -107,7 +120,7 @@ func TestServiceSameObjectCallsWait(t *testing.T) {
 			waitResult(t, upload)
 			waitResult(t, next)
 			switch operation {
-			case "PutObject":
+			case "PutObject", "CompleteMultipartUpload":
 				requireObjectContent(t, s, "photos", "note.txt", []byte("second"))
 			case "GetObject":
 				requireStreamContent(t, stream, size, []byte("first"))
@@ -199,7 +212,7 @@ func TestServiceListObjectsDuringUpload(t *testing.T) {
 	if err := s.PutObject("photos", "keep.txt", strings.NewReader("keep")); err != nil {
 		t.Fatal(err)
 	}
-	release, upload := pauseServiceUpload(t, s, "photos", "new.txt", "new")
+	release, upload := pauseServiceUpload(t, s, "photos", "new.txt", "", 0, "new")
 	var keys []string
 	list := make(chan error, 1)
 	t.Cleanup(func() {
@@ -225,6 +238,91 @@ func TestServiceListObjectsDuringUpload(t *testing.T) {
 	}
 }
 
+// 不同分片测试策略：暂停同一任务的第一片，检查第二片和列表查询无需等待。
+// 暂停期间列表只包含已保存的第二片；全部上传后按编号完成，检查实际内容。
+func TestServiceDifferentPartsProgressIndependently(t *testing.T) {
+	s := setupTestStore(t)
+	if _, err := s.CreateBucket("photos"); err != nil {
+		t.Fatal(err)
+	}
+	id := createTestUpload(t, s, "photos", "note.txt", 2)
+	release, upload := pauseServiceUpload(t, s, "photos", "note.txt", id, 1, "head")
+	var parts []PartInfo
+	other := make(chan error, 1)
+	t.Cleanup(func() {
+		release()
+		waitResult(t, other)
+	})
+	go func() {
+		defer close(other)
+		if _, err := s.UploadPart("photos", "note.txt", id, 2, strings.NewReader("tail")); err != nil {
+			other <- err
+			return
+		}
+		var err error
+		parts, err = s.ListParts("photos", "note.txt", id)
+		other <- err
+	}()
+	waitResult(t, other)
+	if !slices.Equal(parts, []PartInfo{{2, 4}}) {
+		t.Fatalf("上传执行中的分片列表 = %v，期望 [{2 4}]", parts)
+	}
+	release()
+	waitResult(t, upload)
+	requireParts(t, s, "photos", "note.txt", id, []PartInfo{{1, 4}, {2, 4}})
+	if err := s.CompleteMultipartUpload("photos", "note.txt", id); err != nil {
+		t.Fatal(err)
+	}
+	requireObjectContent(t, s, "photos", "note.txt", []byte("headtail"))
+}
+
+// 同一分片测试策略：暂停一次替换，再查询列表并发起同编号替换。
+// 列表仍显示旧片，后一次上传必须等待；全部结束后发布，检查最后一次上传的内容。
+func TestServiceSamePartUploadsWait(t *testing.T) {
+	s := setupTestStore(t)
+	if _, err := s.CreateBucket("photos"); err != nil {
+		t.Fatal(err)
+	}
+	id := createTestUpload(t, s, "photos", "note.txt", 1)
+	uploadTestPart(t, s, "photos", "note.txt", id, 1, []byte("old"))
+	release, upload := pauseServiceUpload(t, s, "photos", "note.txt", id, 1, "first")
+	var parts []PartInfo
+	listed := make(chan error, 1)
+	next := make(chan error, 1)
+	t.Cleanup(func() {
+		release()
+		waitResult(t, next)
+	})
+	go func() {
+		defer close(next)
+		defer close(listed)
+		var err error
+		parts, err = s.ListParts("photos", "note.txt", id)
+		listed <- err
+		if err != nil {
+			return
+		}
+		_, err = s.UploadPart("photos", "note.txt", id, 1, strings.NewReader("second"))
+		next <- err
+	}()
+	waitResult(t, listed)
+	if !slices.Equal(parts, []PartInfo{{1, 3}}) {
+		t.Fatalf("替换执行中的分片列表 = %v，期望 [{1 3}]", parts)
+	}
+	select {
+	case err := <-next:
+		t.Errorf("同一分片的后一次上传在前一次结束前返回：%v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	waitResult(t, upload)
+	waitResult(t, next)
+	if err := s.CompleteMultipartUpload("photos", "note.txt", id); err != nil {
+		t.Fatal(err)
+	}
+	requireObjectContent(t, s, "photos", "note.txt", []byte("second"))
+}
+
 func waitResult(t *testing.T, result <-chan error) {
 	t.Helper()
 	select {
@@ -238,7 +336,7 @@ func waitResult(t *testing.T, result <-chan error) {
 }
 
 // 写入一段内容但不关闭管道，让上传停在等待后续输入的位置。
-func pauseServiceUpload(t *testing.T, s *Service, bucket, key, content string) (func(), <-chan error) {
+func pauseServiceUpload(t *testing.T, s *Service, bucket, key, uploadID string, partNumber int, content string) (func(), <-chan error) {
 	t.Helper()
 	reader, writer := io.Pipe()
 	upload, written := make(chan error, 1), make(chan error, 1)
@@ -250,7 +348,12 @@ func pauseServiceUpload(t *testing.T, s *Service, bucket, key, content string) (
 	})
 	go func() {
 		defer close(upload)
-		err := s.PutObject(bucket, key, reader)
+		var err error
+		if uploadID == "" {
+			err = s.PutObject(bucket, key, reader)
+		} else {
+			_, err = s.UploadPart(bucket, key, uploadID, partNumber, reader)
+		}
 		_ = reader.CloseWithError(err)
 		upload <- err
 	}()

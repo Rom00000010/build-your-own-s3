@@ -59,6 +59,10 @@ HTTP 层按方法、路径和查询参数选择操作，将桶名、key 和请�
 
 HTTP 层不持有锁，各请求在自己的 goroutine 中调用 Service，由 Service 协调并发。
 
-Service 按 `(bucket, key)` 使用互斥锁。`PutObject`、`GetObject`、`DeleteObject` 从方法开始到返回全程持锁，包括同步清理；不同对象使用不同的锁。
+Service 按 `(bucket, key)` 使用对象互斥锁。`PutObject`、`GetObject`、`DeleteObject`、`CompleteMultipartUpload` 从方法开始到返回全程持锁，包括同步清理；不同对象使用不同的锁。
 
-SQLite 通过事务协调元数据访问，FileBlob 支持不同文件并行传输（diskv不支持）；`ListObjects` 依靠数据库查询快照，不取对象锁；桶操作也不取对象锁，其并发限制由调用方保证。
+`UploadPart` 按 `(uploadId, partNumber)` 使用分片互斥锁，从方法开始到返回全程持锁，包括旧文件清理；不同分片使用不同的锁，允许并行传输。
+
+SQLite 通过事务协调元数据访问，FileBlob 支持不同文件并行传输（diskv不支持）；`ListObjects`、`ListParts` 各自依靠单次列表查询取得快照，不取对象锁或分片锁。
+
+桶操作以及分片上传任务的创建、取消不取锁，其并发限制由调用方保证；完成分片上传任务与同任务其他分片请求的重叠也由调用方避免。

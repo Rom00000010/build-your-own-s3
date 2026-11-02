@@ -32,6 +32,12 @@ type Service struct {
 	db          *objectDB
 	files       *objectStorage
 	objectLocks sync.Map // map[[2]string]*sync.Mutex
+	partLocks   sync.Map // map[partKey]*sync.Mutex
+}
+
+type partKey struct {
+	uploadID   string
+	partNumber int
 }
 
 // Open 打开当前工作目录下 data 中的存储；首次打开时创建空存储。
@@ -238,6 +244,10 @@ func (s *Service) CreateMultipartUpload(bucket, key string, totalParts int) (str
 
 // UploadPart 保存非空分片，替换同编号的旧片；读取或保存失败时保留原分片。
 func (s *Service) UploadPart(bucket, key, uploadID string, partNumber int, content io.Reader) (PartInfo, error) {
+	mu := s.partMutex(uploadID, partNumber)
+	mu.Lock()
+	defer mu.Unlock()
+
 	totalParts, err := s.getMultipartUpload(bucket, key, uploadID)
 	if err != nil {
 		return PartInfo{}, err
@@ -285,6 +295,10 @@ func (s *Service) ListParts(bucket, key, uploadID string) ([]PartInfo, error) {
 
 // CompleteMultipartUpload 将全部分片按编号发布为对象；缺片时保留任务和原对象。
 func (s *Service) CompleteMultipartUpload(bucket, key, uploadID string) error {
+	mu := s.objectMutex(bucket, key)
+	mu.Lock()
+	defer mu.Unlock()
+
 	totalParts, err := s.getMultipartUpload(bucket, key, uploadID)
 	if err != nil {
 		return err
@@ -361,6 +375,12 @@ func (s *Service) getMultipartUpload(bucket, key, uploadID string) (int, error) 
 // objectMutex 返回同一对象共用的互斥锁，锁项随 Service 实例保留。
 func (s *Service) objectMutex(bucket, key string) *sync.Mutex {
 	mu, _ := s.objectLocks.LoadOrStore([2]string{bucket, key}, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+// partMutex 返回同一分片共用的互斥锁，锁项随 Service 实例保留。
+func (s *Service) partMutex(uploadID string, partNumber int) *sync.Mutex {
+	mu, _ := s.partLocks.LoadOrStore(partKey{uploadID, partNumber}, &sync.Mutex{})
 	return mu.(*sync.Mutex)
 }
 
