@@ -70,11 +70,114 @@ func TestHTTPRoutes(t *testing.T) {
 	}
 }
 
+// 分片路由测试策略：五种合法请求分别检查路由、路径/查询/JSON 参数和原始字节传递，
+// 再检查 Service 结果到状态码、JSON 或空响应体的转换；每个入口选取一次存储失败。
+func TestHTTPMultipartRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		operation, method, path, body, uploadID, response string
+		totalParts, partNumber, status                    int
+		stub                                              stubService
+	}{
+		{
+			"CreateMultipartUpload", "POST", "/photos/note.txt?uploads",
+			`{"totalParts":3}`, "", `{"uploadId":"upload-id"}`, 3, 0, 201,
+			stubService{createdUploadID: "upload-id"},
+		},
+		{
+			"UploadPart", "PUT", "/photos/note.txt?uploadId=upload-id&partNumber=2",
+			"\x00\xff\n", "upload-id", `{"partNumber":2,"size":3}`, 0, 2, 200,
+			stubService{part: objectstorage.PartInfo{PartNumber: 2, Size: 3}},
+		},
+		{
+			"ListParts", "GET", "/photos/note.txt?uploadId=upload-id", "", "upload-id",
+			`{"parts":[{"partNumber":1,"size":7},{"partNumber":2,"size":3}]}`, 0, 0, 200,
+			stubService{parts: []objectstorage.PartInfo{
+				{PartNumber: 1, Size: 7}, {PartNumber: 2, Size: 3},
+			}},
+		},
+		{
+			"CompleteMultipartUpload", "POST", "/photos/note.txt?uploadId=upload-id",
+			"", "upload-id", "", 0, 0, 204, stubService{},
+		},
+		{
+			"AbortMultipartUpload", "DELETE", "/photos/note.txt?uploadId=upload-id",
+			"", "upload-id", "", 0, 0, 204, stubService{},
+		},
+	} {
+		t.Run(tc.operation, func(t *testing.T) {
+			service := &tc.stub
+			handler := NewHandler(service)
+			serve := func() *httptest.ResponseRecorder {
+				request := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+				if tc.operation == "CreateMultipartUpload" {
+					request.Header.Set("Content-Type", "application/json")
+				}
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				return response
+			}
+			response := serve()
+			if service.calls != 1 || service.operation != tc.operation ||
+				service.bucket != "photos" || service.key != "note.txt" ||
+				service.uploadID != tc.uploadID ||
+				service.totalParts != tc.totalParts || service.partNumber != tc.partNumber {
+				t.Fatalf("Service 调用 = (%s, %q, %q, %q, %d, %d)，次数 %d",
+					service.operation, service.bucket, service.key, service.uploadID,
+					service.totalParts, service.partNumber, service.calls)
+			}
+			if response.Code != tc.status {
+				t.Fatalf("HTTP %d，期望 %d", response.Code, tc.status)
+			}
+			if tc.response != "" {
+				requireResponse(t, response, "application/json", tc.response)
+			} else if response.Body.Len() != 0 {
+				t.Fatalf("成功响应应无响应体，得到 %q", response.Body.String())
+			}
+			if tc.operation == "UploadPart" && !bytes.Equal(service.uploaded, []byte(tc.body)) {
+				t.Fatalf("Service 收到分片 = %v，期望 %v", service.uploaded, []byte(tc.body))
+			}
+			service.err = errors.New("storage failed")
+			requireHTTPError(t, serve(), 500, "InternalError")
+		})
+	}
+}
+
+// 请求解析测试策略：必需查询参数缺失或冲突、编号格式错误、JSON 语法/字段类型错误和
+// Content-Type 错误各取代表；检查返回 400，且不调用 Service 或回退成普通对象操作。
+// 总片数和分片编号的业务取值、分片内容是否为空，由 Service 测试覆盖。
+func TestHTTPInvalidMultipartRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path, body, contentType string
+	}{
+		{"缺少任务ID", "PUT", "/photos/note.txt?partNumber=1", "part", ""},
+		{"缺少分片编号", "PUT", "/photos/note.txt?uploadId=upload-id", "part", ""},
+		{"编号格式错误", "PUT", "/photos/note.txt?uploadId=upload-id&partNumber=abc", "part", ""},
+		{"查询参数冲突", "POST", "/photos/note.txt?uploads&uploadId=upload-id", `{"totalParts":3}`, "application/json"},
+		{"JSON格式错误", "POST", "/photos/note.txt?uploads", "{", "application/json"},
+		{"总片数类型错误", "POST", "/photos/note.txt?uploads", `{"totalParts":"3"}`, "application/json"},
+		{"Content-Type错误", "POST", "/photos/note.txt?uploads", `{"totalParts":3}`, "text/plain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &stubService{}
+			request := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.contentType != "" {
+				request.Header.Set("Content-Type", tc.contentType)
+			}
+			response := httptest.NewRecorder()
+			NewHandler(service).ServeHTTP(response, request)
+			requireHTTPError(t, response, 400, "InvalidMultipartRequest")
+			if service.calls != 0 {
+				t.Fatalf("无效请求调用了 Service 的 %s，次数 %d", service.operation, service.calls)
+			}
+		})
+	}
+}
+
 func TestHTTPEmptyResults(t *testing.T) {
-	for _, tc := range []struct{ path, field string }{{"/", "buckets"}, {"/photos", "keys"}} {
+	for _, tc := range []struct{ path, field string }{{"/", "buckets"}, {"/photos", "keys"}, {"/photos/note.txt?uploadId=upload-id", "parts"}} {
 		t.Run(tc.field, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			NewHandler(&stubService{names: []string{}}).ServeHTTP(response, httptest.NewRequest("GET", tc.path, nil))
+			NewHandler(&stubService{names: []string{}, parts: []objectstorage.PartInfo{}}).ServeHTTP(response, httptest.NewRequest("GET", tc.path, nil))
 			if response.Code != 200 {
 				t.Fatalf("HTTP %d，期望 200", response.Code)
 			}
@@ -110,6 +213,10 @@ func TestHTTPErrorMapping(t *testing.T) {
 		{objectstorage.BucketNotEmptyErr, 409, "BucketNotEmpty"},
 		{objectstorage.BucketNotExistErr, 404, "BucketNotExist"},
 		{objectstorage.ObjectNotExistErr, 404, "ObjectNotExist"},
+		{objectstorage.InvalidMultipartRequestErr, 400, "InvalidMultipartRequest"},
+		{objectstorage.InvalidPartErr, 400, "InvalidPart"},
+		{objectstorage.IncompleteUploadErr, 400, "IncompleteUpload"},
+		{objectstorage.UploadNotExistErr, 404, "UploadNotExist"},
 		{errors.New("storage failed"), 500, "InternalError"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,6 +331,11 @@ type stubService struct {
 	stream                 *trackedStream
 	size                   int64
 	putObject              func(string, string, io.Reader) error
+	uploadID               string
+	totalParts, partNumber int
+	createdUploadID        string
+	part                   objectstorage.PartInfo
+	parts                  []objectstorage.PartInfo
 }
 
 func (s *stubService) record(operation, bucket, key string) error {
@@ -262,6 +374,45 @@ func (s *stubService) DeleteObject(bucket, key string) error {
 }
 func (s *stubService) ListObjects(bucket string) ([]string, error) {
 	return s.names, s.record("ListObjects", bucket, "")
+}
+
+func (s *stubService) CreateMultipartUpload(bucket, key string, totalParts int) (string, error) {
+	s.totalParts = totalParts
+	if err := s.record("CreateMultipartUpload", bucket, key); err != nil {
+		return "", err
+	}
+	return s.createdUploadID, nil
+}
+
+func (s *stubService) UploadPart(bucket, key, uploadID string, partNumber int, content io.Reader) (objectstorage.PartInfo, error) {
+	s.uploadID, s.partNumber = uploadID, partNumber
+	if err := s.record("UploadPart", bucket, key); err != nil {
+		return objectstorage.PartInfo{}, err
+	}
+	var err error
+	s.uploaded, err = io.ReadAll(content)
+	if err != nil {
+		return objectstorage.PartInfo{}, err
+	}
+	return s.part, nil
+}
+
+func (s *stubService) ListParts(bucket, key, uploadID string) ([]objectstorage.PartInfo, error) {
+	s.uploadID = uploadID
+	if err := s.record("ListParts", bucket, key); err != nil {
+		return nil, err
+	}
+	return s.parts, nil
+}
+
+func (s *stubService) CompleteMultipartUpload(bucket, key, uploadID string) error {
+	s.uploadID = uploadID
+	return s.record("CompleteMultipartUpload", bucket, key)
+}
+
+func (s *stubService) AbortMultipartUpload(bucket, key, uploadID string) error {
+	s.uploadID = uploadID
+	return s.record("AbortMultipartUpload", bucket, key)
 }
 
 type trackedStream struct {
