@@ -223,3 +223,49 @@ func (db *objectDB) listParts(uploadID string) ([]uploadPart, error) {
 	}
 	return parts, nil
 }
+
+func (db *objectDB) completeMultipartUpload(bucket, key, uploadID string, files []objectFile, size int64) error {
+	data, err := json.Marshal(files)
+	if err != nil {
+		return err
+	}
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO objects(bucket_name, key, files, size) VALUES (?, ?, ?, ?)
+		ON CONFLICT(bucket_name, key) DO UPDATE SET files = excluded.files, size = excluded.size`, bucket, key, string(data), size); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM multipart_uploads WHERE upload_id = ?`, uploadID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (db *objectDB) deleteMultipartUpload(uploadID string) error {
+	_, err := db.conn.Exec(`DELETE FROM multipart_uploads WHERE upload_id = ?`, uploadID)
+	return err
+}
+
+func (db *objectDB) listBucketUploadFiles(bucket string) ([]objectFile, error) {
+	rows, err := db.conn.Query(`SELECT file_name, size FROM upload_parts
+		WHERE upload_id IN (SELECT upload_id FROM multipart_uploads WHERE bucket_name = ?)`, bucket)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	files := make([]objectFile, 0)
+	for rows.Next() {
+		var file objectFile
+		if err := rows.Scan(&file.Name, &file.Size); err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return files, nil
+}

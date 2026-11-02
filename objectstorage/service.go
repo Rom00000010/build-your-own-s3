@@ -18,6 +18,7 @@ var (
 	ObjectNotExistErr          = errors.New("object does not exist")
 	InvalidMultipartRequestErr = errors.New("invalid multipart request")
 	InvalidPartErr             = errors.New("invalid part")
+	IncompleteUploadErr        = errors.New("incomplete upload")
 	UploadNotExistErr          = errors.New("upload does not exist")
 )
 
@@ -84,11 +85,16 @@ func (s *Service) ListBuckets() ([]string, error) {
 
 // DeleteBucket 删除空桶；桶不存在或非空时返回对应错误。
 func (s *Service) DeleteBucket(name string) error {
+	files, err := s.db.listBucketUploadFiles(name)
+	if err != nil {
+		return err
+	}
 	deleted, err := s.db.deleteEmptyBucket(name)
 	if err != nil {
 		return err
 	}
 	if deleted {
+		_ = s.files.removeFiles(files)
 		return nil
 	}
 	exists, err := s.db.bucketExists(name)
@@ -275,6 +281,60 @@ func (s *Service) ListParts(bucket, key, uploadID string) ([]PartInfo, error) {
 		infos[i] = PartInfo{PartNumber: part.PartNumber, Size: part.File.Size}
 	}
 	return infos, nil
+}
+
+// CompleteMultipartUpload 将全部分片按编号发布为对象；缺片时保留任务和原对象。
+func (s *Service) CompleteMultipartUpload(bucket, key, uploadID string) error {
+	totalParts, err := s.getMultipartUpload(bucket, key, uploadID)
+	if err != nil {
+		return err
+	}
+	files, size, err := s.getUploadFiles(uploadID)
+	if err != nil {
+		return err
+	}
+	if len(files) != totalParts {
+		return IncompleteUploadErr
+	}
+	oldFiles, _, _, err := s.db.getObject(bucket, key)
+	if err != nil {
+		return err
+	}
+	if err := s.db.completeMultipartUpload(bucket, key, uploadID, files, size); err != nil {
+		return err
+	}
+	_ = s.files.removeFiles(oldFiles)
+	return nil
+}
+
+// AbortMultipartUpload 删除任务及其分片，保留已发布对象。
+func (s *Service) AbortMultipartUpload(bucket, key, uploadID string) error {
+	if _, err := s.getMultipartUpload(bucket, key, uploadID); err != nil {
+		return err
+	}
+	files, _, err := s.getUploadFiles(uploadID)
+	if err != nil {
+		return err
+	}
+	if err := s.db.deleteMultipartUpload(uploadID); err != nil {
+		return err
+	}
+	_ = s.files.removeFiles(files)
+	return nil
+}
+
+func (s *Service) getUploadFiles(uploadID string) ([]objectFile, int64, error) {
+	parts, err := s.db.listParts(uploadID)
+	if err != nil {
+		return nil, 0, err
+	}
+	files := make([]objectFile, len(parts))
+	var size int64
+	for i, part := range parts {
+		files[i] = part.File
+		size += part.File.Size
+	}
+	return files, size, nil
 }
 
 func (s *Service) getMultipartUpload(bucket, key, uploadID string) (int, error) {
