@@ -17,6 +17,11 @@ type objectFile struct {
 	Size int64  `json:"size"`
 }
 
+type uploadPart struct {
+	PartNumber int
+	File       objectFile
+}
+
 func openObjectDB(path string) (*objectDB, error) {
 	conn, err := sql.Open("sqlite3", path)
 	if err != nil {
@@ -36,6 +41,21 @@ func openObjectDB(path string) (*objectDB, error) {
 			size INTEGER NOT NULL,
 			PRIMARY KEY (bucket_name, key),
 			FOREIGN KEY (bucket_name) REFERENCES buckets(name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS multipart_uploads (
+			upload_id TEXT PRIMARY KEY,
+			bucket_name TEXT NOT NULL,
+			key TEXT NOT NULL,
+			total_parts INTEGER NOT NULL,
+			FOREIGN KEY (bucket_name) REFERENCES buckets(name) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE IF NOT EXISTS upload_parts (
+			upload_id TEXT NOT NULL,
+			part_number INTEGER NOT NULL,
+			file_name TEXT NOT NULL UNIQUE,
+			size INTEGER NOT NULL,
+			PRIMARY KEY (upload_id, part_number),
+			FOREIGN KEY (upload_id) REFERENCES multipart_uploads(upload_id) ON DELETE CASCADE
 		)`,
 	} {
 		if _, err := conn.Exec(statement); err != nil {
@@ -149,4 +169,57 @@ func (db *objectDB) listObjects(bucket string) ([]string, error) {
 		return nil, err
 	}
 	return keys, nil
+}
+
+func (db *objectDB) createMultipartUpload(bucket, key, uploadID string, totalParts int) error {
+	_, err := db.conn.Exec(`INSERT INTO multipart_uploads(upload_id, bucket_name, key, total_parts) VALUES (?, ?, ?, ?)`,
+		uploadID, bucket, key, totalParts)
+	return err
+}
+
+func (db *objectDB) getMultipartUpload(bucket, key, uploadID string) (int, bool, error) {
+	var totalParts int
+	err := db.conn.QueryRow(`SELECT total_parts FROM multipart_uploads WHERE upload_id = ? AND bucket_name = ? AND key = ?`,
+		uploadID, bucket, key).Scan(&totalParts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return totalParts, err == nil, err
+}
+
+func (db *objectDB) getPart(uploadID string, partNumber int) (objectFile, bool, error) {
+	var file objectFile
+	err := db.conn.QueryRow(`SELECT file_name, size FROM upload_parts WHERE upload_id = ? AND part_number = ?`,
+		uploadID, partNumber).Scan(&file.Name, &file.Size)
+	if errors.Is(err, sql.ErrNoRows) {
+		return objectFile{}, false, nil
+	}
+	return file, err == nil, err
+}
+
+func (db *objectDB) setPart(uploadID string, partNumber int, file objectFile) error {
+	_, err := db.conn.Exec(`INSERT INTO upload_parts(upload_id, part_number, file_name, size) VALUES (?, ?, ?, ?)
+		ON CONFLICT(upload_id, part_number) DO UPDATE SET file_name = excluded.file_name, size = excluded.size`,
+		uploadID, partNumber, file.Name, file.Size)
+	return err
+}
+
+func (db *objectDB) listParts(uploadID string) ([]uploadPart, error) {
+	rows, err := db.conn.Query(`SELECT part_number, file_name, size FROM upload_parts WHERE upload_id = ? ORDER BY part_number`, uploadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	parts := make([]uploadPart, 0)
+	for rows.Next() {
+		var part uploadPart
+		if err := rows.Scan(&part.PartNumber, &part.File.Name, &part.File.Size); err != nil {
+			return nil, err
+		}
+		parts = append(parts, part)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return parts, nil
 }

@@ -1,6 +1,7 @@
 package objectstorage
 
 import (
+	"crypto/rand"
 	"errors"
 	"io"
 	"os"
@@ -9,13 +10,21 @@ import (
 )
 
 var (
-	InvalidBucketNameErr = errors.New("invalid bucket name")
-	BucketNameExistErr   = errors.New("bucket already exists")
-	BucketNotExistErr    = errors.New("bucket does not exist")
-	BucketNotEmptyErr    = errors.New("bucket is not empty")
-	InvalidObjectKeyErr  = errors.New("invalid object key")
-	ObjectNotExistErr    = errors.New("object does not exist")
+	InvalidBucketNameErr       = errors.New("invalid bucket name")
+	BucketNameExistErr         = errors.New("bucket already exists")
+	BucketNotExistErr          = errors.New("bucket does not exist")
+	BucketNotEmptyErr          = errors.New("bucket is not empty")
+	InvalidObjectKeyErr        = errors.New("invalid object key")
+	ObjectNotExistErr          = errors.New("object does not exist")
+	InvalidMultipartRequestErr = errors.New("invalid multipart request")
+	InvalidPartErr             = errors.New("invalid part")
+	UploadNotExistErr          = errors.New("upload does not exist")
 )
+
+type PartInfo struct {
+	PartNumber int
+	Size       int64
+}
 
 // Service 表示一份已打开的对象存储。关闭后不能继续使用该实例。
 type Service struct {
@@ -197,6 +206,96 @@ func (s *Service) ListObjects(bucket string) ([]string, error) {
 		return nil, BucketNotExistErr
 	}
 	return s.db.listObjects(bucket)
+}
+
+// CreateMultipartUpload 创建空任务，返回唯一的任务 ID；totalParts 须为正整数。
+func (s *Service) CreateMultipartUpload(bucket, key string, totalParts int) (string, error) {
+	exists, err := s.db.bucketExists(bucket)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", BucketNotExistErr
+	}
+	if !validObjectKey(key) {
+		return "", InvalidObjectKeyErr
+	}
+	if totalParts <= 0 {
+		return "", InvalidMultipartRequestErr
+	}
+	uploadID := rand.Text()
+	if err := s.db.createMultipartUpload(bucket, key, uploadID, totalParts); err != nil {
+		return "", err
+	}
+	return uploadID, nil
+}
+
+// UploadPart 保存非空分片，替换同编号的旧片；读取或保存失败时保留原分片。
+func (s *Service) UploadPart(bucket, key, uploadID string, partNumber int, content io.Reader) (PartInfo, error) {
+	totalParts, err := s.getMultipartUpload(bucket, key, uploadID)
+	if err != nil {
+		return PartInfo{}, err
+	}
+	if partNumber < 1 || partNumber > totalParts {
+		return PartInfo{}, InvalidPartErr
+	}
+	oldFile, exists, err := s.db.getPart(uploadID, partNumber)
+	if err != nil {
+		return PartInfo{}, err
+	}
+	name, size, err := s.files.write(content)
+	if err != nil {
+		return PartInfo{}, err
+	}
+	if size == 0 {
+		_ = s.files.remove(name)
+		return PartInfo{}, InvalidPartErr
+	}
+	if err := s.db.setPart(uploadID, partNumber, objectFile{Name: name, Size: size}); err != nil {
+		_ = s.files.remove(name)
+		return PartInfo{}, err
+	}
+	if exists {
+		_ = s.files.remove(oldFile.Name)
+	}
+	return PartInfo{PartNumber: partNumber, Size: size}, nil
+}
+
+// ListParts 按编号升序返回任务中已保存分片的编号和实际大小。
+func (s *Service) ListParts(bucket, key, uploadID string) ([]PartInfo, error) {
+	if _, err := s.getMultipartUpload(bucket, key, uploadID); err != nil {
+		return nil, err
+	}
+	parts, err := s.db.listParts(uploadID)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]PartInfo, len(parts))
+	for i, part := range parts {
+		infos[i] = PartInfo{PartNumber: part.PartNumber, Size: part.File.Size}
+	}
+	return infos, nil
+}
+
+func (s *Service) getMultipartUpload(bucket, key, uploadID string) (int, error) {
+	exists, err := s.db.bucketExists(bucket)
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, BucketNotExistErr
+	}
+	if !validObjectKey(key) {
+		return 0, InvalidObjectKeyErr
+	}
+	totalParts, exists, err := s.db.getMultipartUpload(bucket, key, uploadID)
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, UploadNotExistErr
+	}
+	return totalParts, nil
 }
 
 // objectMutex 返回同一对象共用的互斥锁，锁项随 Service 实例保留。
