@@ -31,6 +31,7 @@ type PartInfo struct {
 type Service struct {
 	db          *objectDB
 	files       *objectStorage
+	gc          *garbageCollector
 	objectLocks sync.Map // map[[2]string]*sync.Mutex
 	partLocks   sync.Map // map[partKey]*sync.Mutex
 }
@@ -56,7 +57,7 @@ func Open() (*Service, error) {
 		_ = files.close()
 		return nil, err
 	}
-	return &Service{db: db, files: files}, nil
+	return &Service{db: db, files: files, gc: newGC(db, files.remove)}, nil
 }
 
 // Close 关闭存储。成功关闭后可再次调用 Open 读取已有数据。
@@ -64,6 +65,7 @@ func (s *Service) Close() error {
 	if s.db == nil {
 		return errors.New("store is not open")
 	}
+	s.gc.close()
 	err := errors.Join(s.db.close(), s.files.close())
 	s.db = nil
 	return err
@@ -100,7 +102,7 @@ func (s *Service) DeleteBucket(name string) error {
 		return err
 	}
 	if deleted {
-		_ = s.files.removeFiles(files)
+		s.registerGarbageFiles(files...)
 		return nil
 	}
 	exists, err := s.db.bucketExists(name)
@@ -138,12 +140,12 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 	if err != nil {
 		return err
 	}
-	if err := s.db.setObject(bucket, key, []objectFile{{Name: newName, Size: size}}, size); err != nil {
-		_ = s.files.remove(newName)
+	newFile := objectFile{Name: newName, Size: size}
+	if err := s.db.setObject(bucket, key, []objectFile{newFile}, size); err != nil {
+		s.registerGarbageFiles(newFile)
 		return err
 	}
-	// 元数据已指向新文件；旧文件清理失败不影响这次上传的结果。
-	_ = s.files.removeFiles(oldFiles)
+	s.registerGarbageFiles(oldFiles...)
 	return nil
 }
 
@@ -203,8 +205,7 @@ func (s *Service) DeleteObject(bucket string, key string) error {
 	if err := s.db.deleteObject(bucket, key); err != nil {
 		return err
 	}
-	// 元数据已删除；文件清理失败不影响对象对调用方的可见状态。
-	_ = s.files.removeFiles(files)
+	s.registerGarbageFiles(files...)
 	return nil
 }
 
@@ -263,16 +264,17 @@ func (s *Service) UploadPart(bucket, key, uploadID string, partNumber int, conte
 	if err != nil {
 		return PartInfo{}, err
 	}
+	newFile := objectFile{Name: name, Size: size}
 	if size == 0 {
-		_ = s.files.remove(name)
+		s.registerGarbageFiles(newFile)
 		return PartInfo{}, InvalidPartErr
 	}
-	if err := s.db.setPart(uploadID, partNumber, objectFile{Name: name, Size: size}); err != nil {
-		_ = s.files.remove(name)
+	if err := s.db.setPart(uploadID, partNumber, newFile); err != nil {
+		s.registerGarbageFiles(newFile)
 		return PartInfo{}, err
 	}
 	if exists {
-		_ = s.files.remove(oldFile.Name)
+		s.registerGarbageFiles(oldFile)
 	}
 	return PartInfo{PartNumber: partNumber, Size: size}, nil
 }
@@ -317,7 +319,7 @@ func (s *Service) CompleteMultipartUpload(bucket, key, uploadID string) error {
 	if err := s.db.completeMultipartUpload(bucket, key, uploadID, files, size); err != nil {
 		return err
 	}
-	_ = s.files.removeFiles(oldFiles)
+	s.registerGarbageFiles(oldFiles...)
 	return nil
 }
 
@@ -333,8 +335,17 @@ func (s *Service) AbortMultipartUpload(bucket, key, uploadID string) error {
 	if err := s.db.deleteMultipartUpload(uploadID); err != nil {
 		return err
 	}
-	_ = s.files.removeFiles(files)
+	s.registerGarbageFiles(files...)
 	return nil
+}
+
+// registerGarbageFiles 尽力登记废弃文件，登记失败不改变业务操作的结果。
+func (s *Service) registerGarbageFiles(files ...objectFile) {
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, file.Name)
+	}
+	_ = s.db.addGCFiles(names)
 }
 
 func (s *Service) getUploadFiles(uploadID string) ([]objectFile, int64, error) {

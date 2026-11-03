@@ -103,14 +103,6 @@ func (storage *objectStorage) remove(name string) error {
 	return err
 }
 
-func (storage *objectStorage) removeFiles(files []objectFile) error {
-	var err error
-	for _, file := range files {
-		err = errors.Join(err, storage.remove(file.Name))
-	}
-	return err
-}
-
 func (storage *objectStorage) close() error {
 	return storage.bucket.Close()
 }

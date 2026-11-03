@@ -57,6 +57,9 @@ func openObjectDB(path string) (*objectDB, error) {
 			PRIMARY KEY (upload_id, part_number),
 			FOREIGN KEY (upload_id) REFERENCES multipart_uploads(upload_id) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS gc_files (
+			file_name TEXT PRIMARY KEY
+		)`,
 	} {
 		if _, err := conn.Exec(statement); err != nil {
 			conn.Close()
@@ -268,4 +271,55 @@ func (db *objectDB) listBucketUploadFiles(bucket string) ([]objectFile, error) {
 		return nil, err
 	}
 	return files, nil
+}
+
+func (db *objectDB) addGCFiles(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, name := range names {
+		if _, err := tx.Exec(`INSERT INTO gc_files(file_name) VALUES (?) ON CONFLICT(file_name) DO NOTHING`, name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (db *objectDB) listGCFiles() ([]string, error) {
+	rows, err := db.conn.Query(`SELECT file_name FROM gc_files`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+func (db *objectDB) deleteGCFiles(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, name := range names {
+		if _, err := tx.Exec(`DELETE FROM gc_files WHERE file_name = ?`, name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
