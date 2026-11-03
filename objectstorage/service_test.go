@@ -2,13 +2,16 @@ package objectstorage
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 // Open 失败测试策略：让工作目录中的 data 路径无法作为目录使用，
@@ -227,6 +230,65 @@ func TestPutObject(t *testing.T) {
 	})
 }
 
+// 异步清理测试策略：覆盖一个已有对象，阻塞旧文件删除，检查请求已返回且新内容可读；
+// 放行删除后检查旧文件消失，新对象仍可读取。
+func TestServiceOverwriteCleansOldFileAsynchronously(t *testing.T) {
+	s := setupTestStore(t)
+	if _, err := s.CreateBucket("photos"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutObject("photos", "note.txt", strings.NewReader("old")); err != nil {
+		t.Fatal(err)
+	}
+	files, _, _, err := s.db.getObject("photos", "note.txt")
+	if err != nil || len(files) != 1 {
+		t.Fatalf("原对象文件 = (%v, %v)，期望一个文件", files, err)
+	}
+	oldName := files[0].Name
+	started := make(chan struct{})
+	released := make(chan struct{})
+	cleaned := make(chan error, 1)
+	release := sync.OnceFunc(func() { close(released) })
+	remove := s.gc.remove
+	s.gc.remove = func(name string) error {
+		if name != oldName {
+			return remove(name)
+		}
+		close(started)
+		<-released
+		err := remove(name)
+		cleaned <- err
+		return err
+	}
+
+	overwrite := make(chan error, 1)
+	t.Cleanup(func() {
+		release()
+		waitResult(t, overwrite)
+	})
+	go func() {
+		defer close(overwrite)
+		overwrite <- s.PutObject("photos", "note.txt", strings.NewReader("new"))
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("后台未开始清理旧文件")
+	}
+	waitResult(t, overwrite)
+	requireObjectContent(t, s, "photos", "note.txt", []byte("new"))
+	if exists, err := s.files.bucket.Exists(context.Background(), oldName); err != nil || !exists {
+		t.Fatalf("放行前旧文件存在 = (%t, %v)，期望 (true, nil)", exists, err)
+	}
+
+	release()
+	waitResult(t, cleaned)
+	if exists, err := s.files.bucket.Exists(context.Background(), oldName); err != nil || exists {
+		t.Fatalf("清理后旧文件存在 = (%t, %v)，期望 (false, nil)", exists, err)
+	}
+	requireObjectContent(t, s, "photos", "note.txt", []byte("new"))
+}
+
 // GetObject 测试策略：桶存在或不存在；key 合法、非法或不存在。
 // 成功时检查读取流、对象大小和内容，失败时检查 nil、0 和对应错误。
 func TestGetObject(t *testing.T) {
@@ -343,7 +405,8 @@ func TestListObjects(t *testing.T) {
 	})
 }
 
-// 持久化测试策略：创建、列出和删除桶，上传、覆盖和删除对象；关闭后重新打开，检查状态仍正确。
+// 持久化测试策略：创建、列出和删除桶，上传、覆盖和删除对象；让文件清理失败后重开，
+// 检查业务状态仍正确，旧文件继续清理。
 func TestPersistence(t *testing.T) {
 	useTempWorkingDir(t)
 	s, err := Open()
@@ -374,6 +437,16 @@ func TestPersistence(t *testing.T) {
 	if err := s.PutObject("files", "keep.txt", strings.NewReader("old")); err != nil {
 		t.Fatalf("上传对象失败：%v", err)
 	}
+	oldFiles, _, _, err := s.db.getObject("files", "keep.txt")
+	if err != nil || len(oldFiles) != 1 {
+		t.Fatalf("原对象文件 = (%v, %v)，期望一个文件", oldFiles, err)
+	}
+	failed := make(chan struct{})
+	markFailed := sync.OnceFunc(func() { close(failed) })
+	s.gc.remove = func(string) error {
+		markFailed()
+		return errors.New("文件删除暂时失败")
+	}
 	if err := s.PutObject("files", "keep.txt", strings.NewReader("new")); err != nil {
 		t.Fatalf("覆盖对象失败：%v", err)
 	}
@@ -382,6 +455,14 @@ func TestPersistence(t *testing.T) {
 	}
 	if err := s.DeleteObject("files", "remove.txt"); err != nil {
 		t.Fatalf("删除对象失败：%v", err)
+	}
+	select {
+	case <-failed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("后台未尝试清理文件")
+	}
+	if exists, err := s.files.bucket.Exists(context.Background(), oldFiles[0].Name); err != nil || !exists {
+		t.Fatalf("重开前旧文件存在 = (%t, %v)，期望 (true, nil)", exists, err)
 	}
 
 	if err := s.Close(); err != nil {
@@ -414,6 +495,24 @@ func TestPersistence(t *testing.T) {
 	if err != nil || len(keys) != 1 || keys[0] != "keep.txt" {
 		t.Fatalf("重开后 ListObjects = (%v, %v)，期望仅包含 keep.txt", keys, err)
 	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(5 * time.Second)
+	for {
+		exists, err := s.files.bucket.Exists(context.Background(), oldFiles[0].Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exists {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout:
+			t.Fatal("重开后旧文件未被清理")
+		}
+	}
+	requireObjectContent(t, s, "files", "keep.txt", []byte("new"))
 }
 
 func requireObjectContent(t *testing.T, s *Service, bucket, key string, want []byte) {
