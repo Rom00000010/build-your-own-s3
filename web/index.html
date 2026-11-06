@@ -58,8 +58,18 @@
           <h3>对象</h3>
           <button id="open-upload" class="primary-button panel-heading-button" type="button">上传文件</button>
         </div>
+        <div class="object-toolbar">
+          <span id="selection-count" role="status">未选择对象</span>
+          <div class="object-actions">
+            <button id="download-selected" type="button" disabled>下载所选</button>
+            <button id="delete-selected" class="danger-button" type="button" disabled>删除所选</button>
+          </div>
+        </div>
         <div class="list-header">
-          <span>名称</span>
+          <label class="select-all-objects">
+            <input id="select-all-objects" type="checkbox" aria-label="全选对象" disabled>
+            名称
+          </label>
           <span>操作</span>
         </div>
         <ul id="object-list" class="item-list">
@@ -67,6 +77,7 @@
         </ul>
         <template id="object-item-template">
           <li>
+            <input type="checkbox">
             <span class="item-name"></span>
             <button type="button" data-action="download">下载</button>
             <button class="danger-button" type="button" data-action="delete">删除</button>

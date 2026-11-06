@@ -131,6 +131,7 @@ input:focus-visible, button:focus-visible, .file-picker:focus-within {
 
 .item-list li:last-child { border-bottom: 0; }
 .item-list li:hover { background: light-dark(#eef0f4, #2b3242); }
+.item-list li.is-selected { background: light-dark(#edf2fc, #29364e); }
 .item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 button.item-name {
   min-height: 0;
@@ -147,6 +148,31 @@ button.item-name:hover { color: light-dark(#22478e, #c5d6ff); text-decoration: u
   justify-content: center;
   padding: 1.7rem !important;
 }
+
+/* 对象选择与批量操作 */
+.object-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .75rem;
+  padding: .65rem 1.75rem;
+  border-top: 1px solid light-dark(#dcdfe7, #2b3242);
+  color: light-dark(#788098, #adb6cb);
+  font-size: .8rem;
+}
+.object-toolbar button { min-height: 32px; padding: .3rem .65rem; font-size: .8rem; }
+.object-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.select-all-objects { display: flex; align-items: center; gap: .65rem; color: inherit; font-size: inherit; }
+input[type="checkbox"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: light-dark(#2d539e, #a9c2ff);
+  cursor: pointer;
+}
+input[type="checkbox"]:disabled { cursor: default; }
 
 /* 弹窗与表单 */
 .modal {
@@ -238,8 +264,9 @@ input::placeholder { color: light-dark(#8389a3, #a1abc3); }
 @media (max-width: 700px) {
   .topbar-inner, .workspace { width: min(100% - 2rem, 1100px); }
   .workspace { margin-top: 1.8rem; }
-  .panel-heading, .list-header, .item-list li { padding-left: 1rem; padding-right: 1rem; }
+  .panel-heading, .list-header, .item-list li, .object-toolbar { padding-left: 1rem; padding-right: 1rem; }
   .item-list li { flex-wrap: wrap; }
   .item-name { flex-basis: 100%; }
+  #object-list .item-name { flex-basis: calc(100% - 32px); }
   .modal { padding: 1.2rem; }
 }

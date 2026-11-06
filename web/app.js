@@ -19,6 +19,10 @@ const openUploadButton = document.querySelector('#open-upload');
 const objectList = document.querySelector('#object-list');
 const objectEmpty = document.querySelector('#object-empty');
 const objectItemTemplate = document.querySelector('#object-item-template');
+const selectAllObjects = document.querySelector('#select-all-objects');
+const selectionCount = document.querySelector('#selection-count');
+const downloadSelectedButton = document.querySelector('#download-selected');
+const deleteSelectedButton = document.querySelector('#delete-selected');
 
 // 创建桶弹窗
 const createDialog = document.querySelector('#create-dialog');
@@ -47,7 +51,9 @@ const deleteConfirmButton = document.querySelector('#confirm-delete');
 // 页面状态
 let currentBucket = null;
 let objectKeys = [];
+const selectedObjects = new Set();
 let pendingDelete = null;
+let deletingObjects = false;
 
 // 输入规则与错误提示
 const bucketNameIsValid = name => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name);
@@ -115,14 +121,13 @@ async function runAction(action, button) {
 
 async function writeAndRefresh(writeAction, refreshAction, button, dialog) {
   const succeeded = await runAction(writeAction, button);
-  if (!succeeded) return false;
+  if (!succeeded) return;
   if (dialog) dialog.close();
   try {
     await refreshAction();
   } catch {
     setOperationError('操作已完成，但列表刷新失败。请刷新页面查看最新结果。');
   }
-  return true;
 }
 
 // 弹窗通用行为
@@ -152,13 +157,16 @@ function renderBuckets(bucketNames) {
     const deleteButton = item.querySelector('[data-action="delete"]');
     openButton.textContent = name;
     openButton.addEventListener('click', () => openBucket(name));
-    deleteButton.addEventListener('click', () => openDeleteDialog('存储桶', name,
-      () => requestApi('DELETE', `/${encodeURIComponent(name)}`), refreshBuckets, deleteButton));
+    deleteButton.addEventListener('click', () => openDeleteDialog('删除存储桶',
+      `确定删除存储桶“${name}”吗？此操作无法撤销。`,
+      () => writeAndRefresh(() => requestApi('DELETE', `/${encodeURIComponent(name)}`),
+        refreshBuckets, deleteButton)));
     bucketList.append(item);
   }
 }
 
 async function openBucket(name) {
+  selectedObjects.clear();
   currentBucket = name;
   const succeeded = await runAction(refreshObjects);
   if (!succeeded) {
@@ -178,18 +186,48 @@ async function refreshObjects() {
 }
 
 function renderObjects() {
+  const availableKeys = new Set(objectKeys);
+  for (const key of selectedObjects) {
+    if (!availableKeys.has(key)) selectedObjects.delete(key);
+  }
   objectList.replaceChildren(objectEmpty);
   objectCount.textContent = `${objectKeys.length} 个对象`;
   objectEmpty.hidden = objectKeys.length > 0;
   for (const key of objectKeys) {
     const item = objectItemTemplate.content.firstElementChild.cloneNode(true);
+    const checkbox = item.querySelector('input[type="checkbox"]');
     const downloadButton = item.querySelector('[data-action="download"]');
     const deleteButton = item.querySelector('[data-action="delete"]');
     item.querySelector('.item-name').textContent = key;
+    checkbox.dataset.key = key;
+    checkbox.setAttribute('aria-label', `选择 ${key}`);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) selectedObjects.add(key);
+      else selectedObjects.delete(key);
+      updateObjectSelection();
+    });
     downloadButton.addEventListener('click', () => download(key));
-    deleteButton.addEventListener('click', () => openDeleteDialog('对象', key,
-      () => requestApi('DELETE', objectPath(key)), refreshObjects, deleteButton));
+    deleteButton.addEventListener('click', () => openObjectDeleteDialog([key]));
     objectList.append(item);
+  }
+  updateObjectSelection();
+}
+
+function updateObjectSelection() {
+  const count = selectedObjects.size;
+  selectAllObjects.checked = objectKeys.length > 0 && count === objectKeys.length;
+  selectAllObjects.disabled = objectKeys.length === 0 || deletingObjects;
+  selectionCount.textContent = count ? `已选择 ${count} 个对象` : '未选择对象';
+  downloadSelectedButton.disabled = count === 0;
+  deleteSelectedButton.disabled = count === 0 || deletingObjects;
+  deleteSelectedButton.textContent = deletingObjects ? '正在删除…' : '删除所选';
+  for (const checkbox of objectList.querySelectorAll('input[type="checkbox"]')) {
+    checkbox.checked = selectedObjects.has(checkbox.dataset.key);
+    checkbox.disabled = deletingObjects;
+    checkbox.closest('li').classList.toggle('is-selected', checkbox.checked);
+  }
+  for (const button of objectList.querySelectorAll('[data-action="delete"]')) {
+    button.disabled = deletingObjects;
   }
 }
 
@@ -200,6 +238,8 @@ function objectPath(key) {
 backButton.addEventListener('click', () => {
   clearOperationErrors();
   currentBucket = null;
+  selectedObjects.clear();
+  updateObjectSelection();
   objectsView.hidden = true;
   bucketsView.hidden = false;
 });
@@ -281,6 +321,18 @@ uploadForm.addEventListener('submit', async event => {
 });
 
 // 下载
+selectAllObjects.addEventListener('change', () => {
+  selectedObjects.clear();
+  if (selectAllObjects.checked) {
+    for (const key of objectKeys) selectedObjects.add(key);
+  }
+  updateObjectSelection();
+});
+
+downloadSelectedButton.addEventListener('click', () => {
+  for (const key of selectedObjects) download(key);
+});
+
 // 交给浏览器下载：浏览器负责保存位置、进度和网络错误提示
 function download(key) {
   const link = document.createElement('a');
@@ -291,11 +343,42 @@ function download(key) {
   link.remove();
 }
 
+// 对象删除
+function openObjectDeleteDialog(keys) {
+  if (deletingObjects || keys.length === 0) return;
+  const title = keys.length > 1 ? '批量删除对象' : '删除对象';
+  const description = keys.length > 1
+    ? `确定删除选中的 ${keys.length} 个对象吗？此操作无法撤销。`
+    : `确定删除对象“${keys[0]}”吗？此操作无法撤销。`;
+  openDeleteDialog(title, description, () => deleteObjects(keys));
+}
+
+async function deleteObjects(keys) {
+  if (deletingObjects) return;
+  deletingObjects = true;
+  backButton.disabled = true;
+  openUploadButton.disabled = true;
+  updateObjectSelection();
+  await runAction(async () => {
+    const results = await Promise.allSettled(keys.map(key => requestApi('DELETE', objectPath(key))));
+    await refreshObjects();
+    if (results.some(result => result.status === 'rejected')) {
+      throw new Error('有对象删除失败，请重试。');
+    }
+  });
+  deletingObjects = false;
+  backButton.disabled = false;
+  openUploadButton.disabled = false;
+  updateObjectSelection();
+}
+
+deleteSelectedButton.addEventListener('click', () => openObjectDeleteDialog([...selectedObjects]));
+
 // 删除确认弹窗
-function openDeleteDialog(type, name, deleteAction, refreshAction, button) {
-  deleteTitle.textContent = `删除${type}`;
-  deleteDescription.textContent = `确定删除${type}“${name}”吗？此操作无法撤销。`;
-  pendingDelete = { deleteAction, refreshAction, button };
+function openDeleteDialog(title, description, deleteAction) {
+  deleteTitle.textContent = title;
+  deleteDescription.textContent = description;
+  pendingDelete = deleteAction;
   deleteDialog.showModal();
 }
 
@@ -306,7 +389,7 @@ deleteDialog.addEventListener('close', () => { pendingDelete = null; });
 deleteConfirmButton.addEventListener('click', () => {
   const pending = pendingDelete;
   deleteDialog.close();
-  if (pending) writeAndRefresh(pending.deleteAction, pending.refreshAction, pending.button);
+  if (pending) pending();
 });
 
 // 启动
