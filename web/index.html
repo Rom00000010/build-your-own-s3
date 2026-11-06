@@ -107,17 +107,27 @@
   <dialog id="upload-dialog" class="modal" aria-labelledby="upload-title">
     <form id="upload-form" novalidate>
       <h2 id="upload-title">上传文件</h2>
-      <p class="dialog-description">文件名将直接作为对象 key。</p>
+      <p class="dialog-description">文件名将直接作为对象 key，可多次选择追加文件。标红的文件将跳过上传，同名已有对象会直接覆盖。</p>
       <p class="dialog-error error-message" role="alert" hidden></p>
       <div class="form-field">
         <label for="file">文件</label>
         <div class="file-picker">
-          <input id="file" type="file" aria-describedby="file-error">
+          <input id="file" type="file" multiple aria-describedby="file-error">
           <span class="file-picker-button" aria-hidden="true">选择文件</span>
           <span id="selected-file-name" class="selected-file-name">未选择文件</span>
         </div>
         <p id="file-error" class="field-error" aria-live="polite" hidden></p>
       </div>
+      <ul id="upload-file-list" class="upload-file-list"></ul>
+      <template id="upload-file-item-template">
+        <li>
+          <div class="upload-file-heading">
+            <span class="item-name"></span>
+            <button type="button" data-action="remove">移除</button>
+          </div>
+          <p class="field-error" hidden></p>
+        </li>
+      </template>
       <div class="dialog-actions">
         <button class="cancel-button" type="button">取消</button>
         <button id="upload" class="primary-button" type="submit">上传</button>

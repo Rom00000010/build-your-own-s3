@@ -260,6 +260,14 @@ input::placeholder { color: light-dark(#8389a3, #a1abc3); }
   font-size: .86rem;
 }
 
+/* 上传文件列表 */
+.upload-file-list { max-height: 36vh; overflow-y: auto; margin: 1rem 0 0; padding: 0; list-style: none; }
+.upload-file-list li { padding: .7rem 0; border-bottom: 1px solid light-dark(#dcdfe7, #2b3242); }
+.upload-file-heading { display: flex; align-items: center; gap: .65rem; }
+.upload-file-list button { min-height: 30px; padding: .3rem .65rem; font-size: .8rem; }
+.upload-file-list .field-error { margin-top: .4rem; }
+.upload-file-list .is-invalid .item-name { color: light-dark(#a63f64, #f2a1bb); }
+
 /* 窄屏布局 */
 @media (max-width: 700px) {
   .topbar-inner, .workspace { width: min(100% - 2rem, 1100px); }

@@ -38,6 +38,8 @@ const uploadForm = document.querySelector('#upload-form');
 const fileInput = document.querySelector('#file');
 const fileNameLabel = document.querySelector('#selected-file-name');
 const fileError = document.querySelector('#file-error');
+const uploadFileList = document.querySelector('#upload-file-list');
+const uploadFileItemTemplate = document.querySelector('#upload-file-item-template');
 const uploadCancelButton = uploadDialog.querySelector('.cancel-button');
 const uploadSubmitButton = document.querySelector('#upload');
 
@@ -54,6 +56,7 @@ let objectKeys = [];
 const selectedObjects = new Set();
 let pendingDelete = null;
 let deletingObjects = false;
+let selectedUploads = [];
 
 // 输入规则与错误提示
 const bucketNameIsValid = name => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name);
@@ -276,48 +279,70 @@ createForm.addEventListener('submit', async event => {
 });
 
 // 上传弹窗
-function validateFile() {
-  const file = fileInput.files[0];
-  if (!file) {
-    setInputError(fileInput, fileError, '请选择文件。');
-    return false;
+function renderUploadFiles() {
+  const names = new Set();
+  uploadFileList.replaceChildren();
+  for (const entry of selectedUploads) {
+    entry.error = '';
+    if (!objectKeyIsValid(entry.file.name)) entry.error = errorMessages.InvalidObjectKey;
+    else if (names.has(entry.file.name)) entry.error = '同名文件只上传列表中的第一个。';
+    else names.add(entry.file.name);
+
+    const item = uploadFileItemTemplate.content.firstElementChild.cloneNode(true);
+    item.querySelector('.item-name').textContent = entry.file.name;
+    const error = item.querySelector('.field-error');
+    error.textContent = entry.error;
+    error.hidden = !entry.error;
+    item.classList.toggle('is-invalid', Boolean(entry.error));
+    const removeButton = item.querySelector('[data-action="remove"]');
+    removeButton.setAttribute('aria-label', `移除 ${entry.file.name}`);
+    removeButton.addEventListener('click', () => {
+      selectedUploads = selectedUploads.filter(other => other !== entry);
+      renderUploadFiles();
+    });
+    uploadFileList.append(item);
   }
-  if (!objectKeyIsValid(file.name)) {
-    setInputError(fileInput, fileError, errorMessages.InvalidObjectKey);
-    return false;
-  }
+  const ready = selectedUploads.filter(entry => !entry.error).length;
+  fileNameLabel.textContent = selectedUploads.length ? `已选择 ${selectedUploads.length} 个文件` : '未选择文件';
+  uploadSubmitButton.textContent = ready ? `上传 ${ready} 个文件` : '上传';
   setInputError(fileInput, fileError, '');
-  return true;
 }
 
 openUploadButton.addEventListener('click', () => uploadDialog.showModal());
 
 fileInput.addEventListener('change', () => {
-  const file = fileInput.files[0];
-  fileNameLabel.textContent = file ? file.name : '未选择文件';
-  if (file) validateFile();
-  else setInputError(fileInput, fileError, '');
+  for (const file of fileInput.files) selectedUploads.push({ file });
+  fileInput.value = '';
+  renderUploadFiles();
 });
 
 uploadCancelButton.addEventListener('click', () => uploadDialog.close());
 
 uploadDialog.addEventListener('close', () => {
-  fileInput.value = '';
-  fileNameLabel.textContent = '未选择文件';
-  setInputError(fileInput, fileError, '');
+  selectedUploads = [];
+  renderUploadFiles();
   clearDialogError(uploadDialog);
 });
 
 uploadForm.addEventListener('submit', async event => {
   event.preventDefault();
-  if (!validateFile()) return;
-  const file = fileInput.files[0];
-  const key = file.name;
-  if (objectKeys.includes(key) && !window.confirm(`对象 ${key} 已存在，确认覆盖吗？`)) return;
-  uploadCancelButton.disabled = true;
-  await writeAndRefresh(() => requestApi('PUT', objectPath(key), file),
-    refreshObjects, uploadSubmitButton, uploadDialog);
-  uploadCancelButton.disabled = false;
+  if (uploadSubmitButton.disabled) return;
+  const files = selectedUploads.filter(entry => !entry.error).map(entry => entry.file);
+  if (files.length === 0) {
+    setInputError(fileInput, fileError, selectedUploads.length ? '没有可上传的文件，请重新选择。' : '请选择文件。');
+    return;
+  }
+  const controls = [fileInput, uploadCancelButton, ...uploadFileList.querySelectorAll('button')];
+  for (const control of controls) control.disabled = true;
+  await runAction(async () => {
+    const results = await Promise.allSettled(files.map(file => requestApi('PUT', objectPath(file.name), file)));
+    await refreshObjects();
+    if (results.some(result => result.status === 'rejected')) {
+      throw new Error('有文件上传失败，请重试。');
+    }
+    uploadDialog.close();
+  }, uploadSubmitButton);
+  for (const control of controls) control.disabled = false;
 });
 
 // 下载
