@@ -3,11 +3,13 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"build_your_own_s3/objectstorage"
 )
@@ -17,7 +19,7 @@ type objectService interface {
 	ListBuckets() ([]string, error)
 	DeleteBucket(string) error
 	PutObject(string, string, io.Reader) error
-	GetObject(string, string) (io.ReadCloser, int64, error)
+	GetObject(string, string, *objectstorage.ByteRange, string) (objectstorage.ObjectRead, error)
 	DeleteObject(string, string) error
 	ListObjects(string) ([]string, error)
 	CreateMultipartUpload(string, string, int) (string, error)
@@ -144,16 +146,63 @@ func (h *handler) putObject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getObject(w http.ResponseWriter, r *http.Request) {
-	stream, size, err := h.service.GetObject(r.PathValue("bucket"), r.PathValue("key"))
+	var byteRange *objectstorage.ByteRange
+	if r.Method == http.MethodGet {
+		byteRange = parseRange(strings.Join(r.Header.Values("Range"), ","))
+	}
+	object, err := h.service.GetObject(r.PathValue("bucket"), r.PathValue("key"), byteRange, r.Header.Get("If-Range"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	defer stream.Close()
+	defer object.Body.Close()
+	size, status := object.Size, http.StatusOK
+	if object.Range != nil {
+		start, end := *object.Range.Start, *object.Range.End
+		size = end - start + 1
+		status = http.StatusPartialContent
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, object.Size))
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, stream)
+	w.Header().Set("ETag", object.ETag)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.WriteHeader(status)
+	if r.Method != http.MethodHead {
+		_, _ = io.Copy(w, object.Body)
+	}
+}
+
+// parseRange 解析单个 bytes 范围；返回 nil 表示按完整下载处理。
+func parseRange(value string) *objectstorage.ByteRange {
+	value, ok := strings.CutPrefix(strings.TrimSpace(value), "bytes=")
+	if !ok {
+		return nil
+	}
+	start, end, ok := strings.Cut(value, "-")
+	if !ok {
+		return nil
+	}
+	first, validStart := parseRangeBound(start)
+	last, validEnd := parseRangeBound(end)
+	if !validStart || !validEnd || first == nil && last == nil {
+		return nil
+	}
+	if first != nil && last != nil && *last < *first {
+		return nil
+	}
+	return &objectstorage.ByteRange{Start: first, End: last}
+}
+
+func parseRangeBound(value string) (*int64, bool) {
+	if value == "" {
+		return nil, true
+	}
+	number, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || value[0] < '0' || value[0] > '9' {
+		return nil, false
+	}
+	return &number, true
 }
 
 func (h *handler) deleteObject(w http.ResponseWriter, r *http.Request) {
@@ -262,6 +311,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status, name = http.StatusNotFound, "BucketNotExist"
 	case errors.Is(err, objectstorage.ObjectNotExistErr):
 		status, name = http.StatusNotFound, "ObjectNotExist"
+	case errors.Is(err, objectstorage.InvalidRangeErr):
+		status, name = http.StatusRequestedRangeNotSatisfiable, "InvalidRange"
 	case errors.Is(err, objectstorage.InvalidMultipartRequestErr):
 		status, name = http.StatusBadRequest, "InvalidMultipartRequest"
 	case errors.Is(err, objectstorage.InvalidPartErr):

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -158,7 +159,7 @@ func TestDeleteBucket(t *testing.T) {
 //   - 桶：存在、不存在；key：合法、空、首字符非法、过长。
 //   - 内容：非空、空 Reader、读取中途失败；对象：新 key、已有 key。
 //
-// 成功时用 GetObject 检查内容与大小；失败时检查原对象仍可读取。
+// 成功时检查内容、大小和非空 ETag，覆盖时 ETag 更新；失败时保留原内容及 ETag。
 func TestPutObject(t *testing.T) {
 	s := setupTestStore(t)
 
@@ -182,10 +183,17 @@ func TestPutObject(t *testing.T) {
 		if err := s.PutObject(bucket, key, strings.NewReader("old-long-content")); err != nil {
 			t.Fatalf("准备原对象失败：%v", err)
 		}
-		if err := s.PutObject(bucket, key, strings.NewReader("new")); err != nil {
-			t.Fatalf("覆盖对象失败：%v", err)
+		oldETag := requireObjectContent(t, s, bucket, key, []byte("old-long-content"))
+		for range 2 {
+			if err := s.PutObject(bucket, key, strings.NewReader("new")); err != nil {
+				t.Fatalf("覆盖对象失败：%v", err)
+			}
+			newETag := requireObjectContent(t, s, bucket, key, []byte("new"))
+			if newETag == oldETag {
+				t.Fatal("每次成功覆盖应生成新 ETag，包括相同内容")
+			}
+			oldETag = newETag
 		}
-		requireObjectContent(t, s, bucket, key, []byte("new"))
 	})
 
 	t.Run("读取失败不覆盖原对象", func(t *testing.T) {
@@ -193,11 +201,14 @@ func TestPutObject(t *testing.T) {
 		if err := s.PutObject(bucket, key, strings.NewReader("old")); err != nil {
 			t.Fatalf("准备原对象失败：%v", err)
 		}
+		oldETag := requireObjectContent(t, s, bucket, key, []byte("old"))
 		broken := io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(errors.New("read failed")))
 		if err := s.PutObject(bucket, key, broken); err == nil {
 			t.Fatal("读取失败时 PutObject 应返回错误")
 		}
-		requireObjectContent(t, s, bucket, key, []byte("old"))
+		if got := requireObjectContent(t, s, bucket, key, []byte("old")); got != oldETag {
+			t.Fatal("覆盖失败应保留原 ETag")
+		}
 	})
 
 	t.Run("桶不存在", func(t *testing.T) {
@@ -240,7 +251,8 @@ func TestServiceOverwriteCleansOldFileAsynchronously(t *testing.T) {
 	if err := s.PutObject("photos", "note.txt", strings.NewReader("old")); err != nil {
 		t.Fatal(err)
 	}
-	files, _, _, err := s.db.getObject("photos", "note.txt")
+	object, _, err := s.db.getObject("photos", "note.txt")
+	files := object.Files
 	if err != nil || len(files) != 1 {
 		t.Fatalf("原对象文件 = (%v, %v)，期望一个文件", files, err)
 	}
@@ -289,24 +301,59 @@ func TestServiceOverwriteCleansOldFileAsynchronously(t *testing.T) {
 	requireObjectContent(t, s, "photos", "note.txt", []byte("new"))
 }
 
-// GetObject 测试策略：桶存在或不存在；key 合法、非法或不存在。
-// 成功时检查读取流、对象大小和内容，失败时检查 nil、0 和对应错误。
+// GetObject 测试策略：三种 range 下载写法；错误取起点越界、空对象和起止倒置。
+// 指定起止位置的用例同时覆盖版本匹配和截断；版本不匹配的越界请求应回退完整下载。
 func TestGetObject(t *testing.T) {
 	s := setupTestStore(t)
 
 	const bucket = "get-object-test"
 	const key = "note.txt"
-	content := []byte("hello")
+	content := []byte("abcdefghij")
 	if _, err := s.CreateBucket(bucket); err != nil {
 		t.Fatalf("准备桶失败：%v", err)
 	}
 	if err := s.PutObject(bucket, key, bytes.NewReader(content)); err != nil {
 		t.Fatalf("准备对象失败：%v", err)
 	}
+	etag := requireObjectContent(t, s, bucket, key, content)
+	if err := s.PutObject(bucket, "empty", bytes.NewReader(nil)); err != nil {
+		t.Fatal(err)
+	}
+	requireObjectContent(t, s, bucket, "empty", nil)
 
-	t.Run("对象存在", func(t *testing.T) {
-		requireObjectContent(t, s, bucket, key, content)
-	})
+	for _, tc := range []struct {
+		name, key    string
+		byteRange    *ByteRange
+		expectedETag string
+		want         string
+		wantRange    *ByteRange
+		wantErr      error
+	}{
+		{"指定起止位置且版本匹配", key, &ByteRange{int64Ptr(8), int64Ptr(99)}, etag, "ij", &ByteRange{int64Ptr(8), int64Ptr(9)}, nil},
+		{"至末尾", key, &ByteRange{Start: int64Ptr(7)}, "", "hij", &ByteRange{int64Ptr(7), int64Ptr(9)}, nil},
+		{"后缀", key, &ByteRange{End: int64Ptr(3)}, "", "hij", &ByteRange{int64Ptr(7), int64Ptr(9)}, nil},
+		{"起点越界", key, &ByteRange{Start: int64Ptr(10)}, "", "", nil, InvalidRangeErr},
+		{"空对象 range 下载", "empty", &ByteRange{Start: int64Ptr(0)}, "", "", nil, InvalidRangeErr},
+		{"起止位置倒置", key, &ByteRange{int64Ptr(3), int64Ptr(1)}, "", "", nil, InvalidRangeErr},
+		{"版本不匹配时忽略起点越界", key, &ByteRange{Start: int64Ptr(10)}, etag + "-old", "abcdefghij", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.GetObject(bucket, tc.key, tc.byteRange, tc.expectedETag)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("GetObject 错误 = %v，期望 %v", err, tc.wantErr)
+			}
+			if err != nil {
+				if got != (ObjectRead{}) {
+					t.Fatalf("失败应返回零值，得到 %+v", got)
+				}
+				return
+			}
+			if got.Size != int64(len(content)) || got.ETag != etag || !reflect.DeepEqual(got.Range, tc.wantRange) {
+				t.Fatalf("读取元数据 = (%d, %q, %+v)，期望 (%d, %q, %+v)", got.Size, got.ETag, got.Range, len(content), etag, tc.wantRange)
+			}
+			requireStreamContent(t, got.Body, int64(len(tc.want)), []byte(tc.want))
+		})
+	}
 
 	for _, tc := range []struct {
 		label, bucket, key string
@@ -317,9 +364,9 @@ func TestGetObject(t *testing.T) {
 		{"对象不存在", bucket, "missing.txt", ObjectNotExistErr},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
-			stream, size, err := s.GetObject(tc.bucket, tc.key)
-			if stream != nil || size != 0 || !errors.Is(err, tc.err) {
-				t.Fatalf("GetObject(%q, %q) = (%v, %d, %v)，期望 (nil, 0, %v)", tc.bucket, tc.key, stream, size, err, tc.err)
+			got, err := s.GetObject(tc.bucket, tc.key, nil, "")
+			if got != (ObjectRead{}) || !errors.Is(err, tc.err) {
+				t.Fatalf("GetObject(%q, %q) = (%+v, %v)，期望零值和 %v", tc.bucket, tc.key, got, err, tc.err)
 			}
 		})
 	}
@@ -343,9 +390,9 @@ func TestDeleteObject(t *testing.T) {
 		if err := s.DeleteObject(bucket, key); err != nil {
 			t.Fatalf("DeleteObject 返回错误：%v", err)
 		}
-		stream, size, err := s.GetObject(bucket, key)
-		if stream != nil || size != 0 || !errors.Is(err, ObjectNotExistErr) {
-			t.Fatalf("删除后 GetObject = (%v, %d, %v)，期望 (nil, 0, ObjectNotExistErr)", stream, size, err)
+		got, err := s.GetObject(bucket, key, nil, "")
+		if got != (ObjectRead{}) || !errors.Is(err, ObjectNotExistErr) {
+			t.Fatalf("删除后 GetObject = (%+v, %v)，期望零值和 ObjectNotExistErr", got, err)
 		}
 	})
 
@@ -437,7 +484,8 @@ func TestPersistence(t *testing.T) {
 	if err := s.PutObject("files", "keep.txt", strings.NewReader("old")); err != nil {
 		t.Fatalf("上传对象失败：%v", err)
 	}
-	oldFiles, _, _, err := s.db.getObject("files", "keep.txt")
+	object, _, err := s.db.getObject("files", "keep.txt")
+	oldFiles := object.Files
 	if err != nil || len(oldFiles) != 1 {
 		t.Fatalf("原对象文件 = (%v, %v)，期望一个文件", oldFiles, err)
 	}
@@ -487,9 +535,9 @@ func TestPersistence(t *testing.T) {
 		t.Fatalf("重开后空桶 ListObjects = (%v, %v)，期望非 nil 空切片", keys, err)
 	}
 	requireObjectContent(t, s, "files", "keep.txt", []byte("new"))
-	stream, size, err := s.GetObject("files", "remove.txt")
-	if stream != nil || size != 0 || !errors.Is(err, ObjectNotExistErr) {
-		t.Fatalf("重开后已删除对象 GetObject = (%v, %d, %v)，期望 (nil, 0, ObjectNotExistErr)", stream, size, err)
+	got, err := s.GetObject("files", "remove.txt", nil, "")
+	if got != (ObjectRead{}) || !errors.Is(err, ObjectNotExistErr) {
+		t.Fatalf("重开后已删除对象 GetObject = (%+v, %v)，期望零值和 ObjectNotExistErr", got, err)
 	}
 	keys, err = s.ListObjects("files")
 	if err != nil || len(keys) != 1 || keys[0] != "keep.txt" {
@@ -515,14 +563,17 @@ func TestPersistence(t *testing.T) {
 	requireObjectContent(t, s, "files", "keep.txt", []byte("new"))
 }
 
-func requireObjectContent(t *testing.T, s *Service, bucket, key string, want []byte) {
+func requireObjectContent(t *testing.T, s *Service, bucket, key string, want []byte) string {
 	t.Helper()
-	stream, size, err := s.GetObject(bucket, key)
-	if err != nil || stream == nil {
-		t.Fatalf("GetObject(%q, %q) = (%v, %d, %v)", bucket, key, stream, size, err)
+	got, err := s.GetObject(bucket, key, nil, "")
+	if err != nil || got.Body == nil || got.ETag == "" || got.Range != nil {
+		t.Fatalf("GetObject(%q, %q) = (%+v, %v)", bucket, key, got, err)
 	}
-	requireStreamContent(t, stream, size, want)
+	requireStreamContent(t, got.Body, got.Size, want)
+	return got.ETag
 }
+
+func int64Ptr(value int64) *int64 { return &value }
 
 func requireStreamContent(t *testing.T, stream io.ReadCloser, size int64, want []byte) {
 	t.Helper()

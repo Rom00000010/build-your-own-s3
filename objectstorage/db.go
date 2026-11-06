@@ -17,6 +17,12 @@ type objectFile struct {
 	Size int64  `json:"size"`
 }
 
+type object struct {
+	Files []objectFile
+	Size  int64
+	ETag  string
+}
+
 type uploadPart struct {
 	PartNumber int
 	File       objectFile
@@ -39,6 +45,7 @@ func openObjectDB(path string) (*objectDB, error) {
 			key TEXT NOT NULL,
 			files TEXT NOT NULL,
 			size INTEGER NOT NULL,
+			etag TEXT NOT NULL,
 			PRIMARY KEY (bucket_name, key),
 			FOREIGN KEY (bucket_name) REFERENCES buckets(name)
 		)`,
@@ -121,30 +128,30 @@ func (db *objectDB) bucketExists(name string) (bool, error) {
 	return err == nil, err
 }
 
-func (db *objectDB) getObject(bucket, key string) ([]objectFile, int64, bool, error) {
+func (db *objectDB) getObject(bucket, key string) (object, bool, error) {
 	var data string
-	var size int64
-	err := db.conn.QueryRow(`SELECT files, size FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key).Scan(&data, &size)
+	var metadata object
+	err := db.conn.QueryRow(`SELECT files, size, etag FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key).Scan(&data, &metadata.Size, &metadata.ETag)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, 0, false, nil
+		return object{}, false, nil
 	}
 	if err != nil {
-		return nil, 0, false, err
+		return object{}, false, err
 	}
-	var files []objectFile
-	if err := json.Unmarshal([]byte(data), &files); err != nil {
-		return nil, 0, false, err
+	if err := json.Unmarshal([]byte(data), &metadata.Files); err != nil {
+		return object{}, false, err
 	}
-	return files, size, true, nil
+	return metadata, true, nil
 }
 
-func (db *objectDB) setObject(bucket, key string, files []objectFile, size int64) error {
-	data, err := json.Marshal(files)
+func (db *objectDB) setObject(bucket, key string, object object) error {
+	data, err := json.Marshal(object.Files)
 	if err != nil {
 		return err
 	}
-	_, err = db.conn.Exec(`INSERT INTO objects(bucket_name, key, files, size) VALUES (?, ?, ?, ?)
-		ON CONFLICT(bucket_name, key) DO UPDATE SET files = excluded.files, size = excluded.size`, bucket, key, string(data), size)
+	_, err = db.conn.Exec(`INSERT INTO objects(bucket_name, key, files, size, etag) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(bucket_name, key) DO UPDATE SET files = excluded.files, size = excluded.size, etag = excluded.etag`,
+		bucket, key, string(data), object.Size, object.ETag)
 	return err
 }
 
@@ -227,8 +234,8 @@ func (db *objectDB) listParts(uploadID string) ([]uploadPart, error) {
 	return parts, nil
 }
 
-func (db *objectDB) completeMultipartUpload(bucket, key, uploadID string, files []objectFile, size int64) error {
-	data, err := json.Marshal(files)
+func (db *objectDB) completeMultipartUpload(bucket, key, uploadID string, object object) error {
+	data, err := json.Marshal(object.Files)
 	if err != nil {
 		return err
 	}
@@ -237,8 +244,9 @@ func (db *objectDB) completeMultipartUpload(bucket, key, uploadID string, files 
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO objects(bucket_name, key, files, size) VALUES (?, ?, ?, ?)
-		ON CONFLICT(bucket_name, key) DO UPDATE SET files = excluded.files, size = excluded.size`, bucket, key, string(data), size); err != nil {
+	if _, err := tx.Exec(`INSERT INTO objects(bucket_name, key, files, size, etag) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(bucket_name, key) DO UPDATE SET files = excluded.files, size = excluded.size, etag = excluded.etag`,
+		bucket, key, string(data), object.Size, object.ETag); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM multipart_uploads WHERE upload_id = ?`, uploadID); err != nil {

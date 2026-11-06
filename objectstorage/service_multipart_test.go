@@ -131,12 +131,11 @@ func TestListParts(t *testing.T) {
 	uploadTestPart(t, s, "photos", "note.txt", other, 1, []byte("other"))
 	requireParts(t, s, "photos", "note.txt", id, []PartInfo{{1, 1}, {3, 4}})
 	requireParts(t, s, "photos", "note.txt", other, []PartInfo{{1, 5}})
-	stream, size, err := s.GetObject("photos", "note.txt")
+	got, err := s.GetObject("photos", "note.txt", nil, "")
 	keys, listErr := s.ListObjects("photos")
-	if stream != nil || size != 0 || !errors.Is(err, ObjectNotExistErr) ||
+	if got != (ObjectRead{}) || !errors.Is(err, ObjectNotExistErr) ||
 		listErr != nil || keys == nil || len(keys) != 0 {
-		t.Fatalf("未完成对象 GetObject = (%v, %d, %v)，ListObjects = (%v, %v)",
-			stream, size, err, keys, listErr)
+		t.Fatalf("未完成对象 GetObject = (%+v, %v)，ListObjects = (%v, %v)", got, err, keys, listErr)
 	}
 	parts, err := s.ListParts("photos", "other.txt", id)
 	if parts != nil || !errors.Is(err, UploadNotExistErr) {
@@ -154,7 +153,7 @@ func TestListParts(t *testing.T) {
 }
 
 // CompleteMultipartUpload 测试策略：已有对象上先缺尾片，补齐后完成。
-// 检查缺片时保留任务和原对象，完成后按序覆盖、更新列表并使任务失效。
+// 检查缺片时保留任务、内容及 ETag，完成后按序覆盖、更新 ETag 和列表并使任务失效。
 func TestCompleteMultipartUpload(t *testing.T) {
 	s := setupTestStore(t)
 	if _, err := s.CreateBucket("photos"); err != nil {
@@ -163,18 +162,23 @@ func TestCompleteMultipartUpload(t *testing.T) {
 	if err := s.PutObject("photos", "note.txt", strings.NewReader("old")); err != nil {
 		t.Fatal(err)
 	}
+	oldETag := requireObjectContent(t, s, "photos", "note.txt", []byte("old"))
 	id := createTestUpload(t, s, "photos", "note.txt", 2)
 	uploadTestPart(t, s, "photos", "note.txt", id, 1, []byte("new"))
 	if err := s.CompleteMultipartUpload("photos", "note.txt", id); !errors.Is(err, IncompleteUploadErr) {
 		t.Fatalf("缺尾片时完成返回 %v，期望 IncompleteUploadErr", err)
 	}
 	requireParts(t, s, "photos", "note.txt", id, []PartInfo{{1, 3}})
-	requireObjectContent(t, s, "photos", "note.txt", []byte("old"))
+	if got := requireObjectContent(t, s, "photos", "note.txt", []byte("old")); got != oldETag {
+		t.Fatal("完成失败应保留原 ETag")
+	}
 	uploadTestPart(t, s, "photos", "note.txt", id, 2, []byte("content"))
 	if err := s.CompleteMultipartUpload("photos", "note.txt", id); err != nil {
 		t.Fatal(err)
 	}
-	requireObjectContent(t, s, "photos", "note.txt", []byte("newcontent"))
+	if got := requireObjectContent(t, s, "photos", "note.txt", []byte("newcontent")); got == oldETag {
+		t.Fatal("完成成功应生成新 ETag")
+	}
 	keys, err := s.ListObjects("photos")
 	if err != nil || !slices.Equal(keys, []string{"note.txt"}) {
 		t.Fatalf("完成后 ListObjects = (%v, %v)", keys, err)

@@ -8,7 +8,7 @@
 | ListBuckets | `GET /` | 无 | `200 OK`，`Content-Type: application/json`，响应体为 `{"buckets":["photos","documents"]}` |
 | DeleteBucket | `DELETE /{bucket}` | 无 | `204 No Content`，无响应体 |
 | PutObject | `PUT /{bucket}/{key}` | 原始对象字节 | `204 No Content`，无响应体 |
-| GetObject | `GET /{bucket}/{key}` | 无 | `200 OK`，响应体为原始对象字节；`Content-Type: application/octet-stream`，`Content-Length` 为对象大小 |
+| GetObject | `GET /{bucket}/{key}` | 无 | 完整下载返回 `200 OK`，range 下载返回 `206 Partial Content`；响应体为对应字节，`Content-Type: application/octet-stream`，`Content-Length` 为响应体大小，并返回 `ETag`、`Accept-Ranges: bytes`；range 下载还返回 `Content-Range` |
 | DeleteObject | `DELETE /{bucket}/{key}` | 无 | `204 No Content`，无响应体 |
 | ListObjects | `GET /{bucket}` | 无 | `200 OK`，`Content-Type: application/json`，响应体为 `{"keys":["a.txt","b.txt"]}` |
 | CreateMultipartUpload | `POST /{bucket}/{key}?uploads` | JSON `{"totalParts":3}` | `201 Created`，JSON `{"uploadId":"..."}` |
@@ -33,6 +33,7 @@
 | 删除非空桶 | `409 Conflict` | `BucketNotEmpty` |
 | 桶不存在 | `404 Not Found` | `BucketNotExist` |
 | 对象不存在（GetObject） | `404 Not Found` | `ObjectNotExist` |
+| range 下载请求的范围不可满足 | `416 Range Not Satisfiable` | `InvalidRange` |
 | 分片请求的参数、JSON 或 `Content-Type` 不合法，或总片数不是正整数 | `400 Bad Request` | `InvalidMultipartRequest` |
 | 分片编号不在任务的 `1～totalParts` 内，或分片内容为空 | `400 Bad Request` | `InvalidPart` |
 | 完成任务时缺少分片 | `400 Bad Request` | `IncompleteUpload` |
@@ -43,7 +44,9 @@
 
 - **桶名**：长 1–63 个字符，仅含小写英文字母、数字和连字符；首尾必须是字母或数字。
 - **key**：长 1–255 个字符，仅含英文字母、数字、点、下划线和连字符；首字符必须是英文字母或数字，不允许 `/`。
-- **上传**：同一 key 再次上传会完整覆盖原内容。
+- **上传**：成功时生成独立的Etag，同一 key 再次上传会完整覆盖原内容；失败时保留原内容及 ETag。
+- **range 下载**：通过 `Range` 请求单个字节范围，支持指定起止位置、从指定位置到末尾，以及末尾若干字节。超出末尾的部分截断，请求范围不可满足（包括空对象的 range 请求）时返回 `InvalidRange`。未指定 `Range`、格式错误、单位不支持或请求多个范围时返回完整对象。
+- **条件 range 下载**：请求携带 `If-Range` 时，仅在其与当前 ETag 匹配时返回所请求的字节，否则返回完整对象。
 - **删除**：key 不存在时仍返回 `204`。
 - **列表**：包含桶内全部 key，每个只出现一次，顺序不保证；空桶返回 `{"keys":[]}`。
 - **桶列表**：包含全部桶名，每个只出现一次，顺序不保证；没有桶时返回 `{"buckets":[]}`。
@@ -51,7 +54,7 @@
 - **分片任务**：任务绑定创建时的桶和 key，由唯一、不复用的 `uploadId` 标识。
 - **上传分片**：内容非空，分片可按任意顺序上传。同编号再次成功上传会替换旧片，替换失败时保留旧片。
 - **分片列表**：只返回已成功保存的分片，按编号升序排列；没有分片时返回 `{"parts":[]}`。
-- **完成任务**：缺少分片时任务和已发布对象保持不变，可补片后重试。
+- **完成任务**：成功时发布完整对象及新 ETag；失败时保留已发布对象及其 ETag。缺少分片时任务保持不变，可补片后重试。
 
 ### 并发
 

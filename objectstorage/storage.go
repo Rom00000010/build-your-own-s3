@@ -65,18 +65,28 @@ func (storage *objectStorage) write(content io.Reader) (string, int64, error) {
 	}
 }
 
-func (storage *objectStorage) read(files []objectFile) (io.ReadCloser, error) {
+func (storage *objectStorage) read(files []objectFile, offset, length int64) (io.ReadCloser, error) {
 	stream := &objectReader{}
 	readers := make([]io.Reader, 0, len(files))
-	// 先打开全部文件，保证后续覆盖或删除对象不影响当前读取流。
+	// 返回前打开全部所需文件，保证后续覆盖或删除不影响读取。
 	for _, file := range files {
-		reader, err := storage.bucket.NewReader(context.Background(), file.Name, nil)
+		if length == 0 {
+			break
+		}
+		if offset >= file.Size {
+			offset -= file.Size
+			continue
+		}
+		readLength := min(length, file.Size-offset)
+		reader, err := storage.bucket.NewRangeReader(context.Background(), file.Name, offset, readLength, nil)
 		if err != nil {
 			_ = stream.Close()
 			return nil, err
 		}
 		stream.readers = append(stream.readers, reader)
 		readers = append(readers, reader)
+		length -= readLength
+		offset = 0
 	}
 	stream.Reader = io.MultiReader(readers...)
 	return stream, nil

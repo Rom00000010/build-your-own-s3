@@ -23,10 +23,12 @@
 
 对象通过有序的 `files` 记录内部文件名和大小，`size` 为总大小。普通上传对应一个内部文件；每个分片也保存为一个内部文件，完成分片上传后，对象按分片编号顺序引用这些内部文件。
 
+`etag` 是每次发布时生成的随机版本标识，与 `files`、`size` 一起保存。
+
 | 表 | 字段 | 主键与关联 |
 | --- | --- | --- |
 | `buckets` | `name` | `name` 主键 |
-| `objects` | `bucket_name, key, size, files` | `(bucket_name, key)` 主键；桶外键关联 `buckets` |
+| `objects` | `bucket_name, key, size, files, etag` | `(bucket_name, key)` 主键；桶外键关联 `buckets` |
 | `multipart_uploads` | `upload_id, bucket_name, key, total_parts` | `upload_id` 主键；桶外键关联 `buckets`，删除桶时级联删除分片上传任务 |
 | `upload_parts` | `upload_id, part_number, file_name, size` | `(upload_id, part_number)` 主键；文件名唯一；任务外键关联 `multipart_uploads`，删除分片上传任务时级联删除分片记录 |
 | `gc_files` | `file_name` | 文件名主键，无外键关联 |
@@ -39,9 +41,15 @@ HTTP 层按方法、路径和查询参数选择操作，将桶名、key 和请�
 
 ### 普通对象操作
 
-- **上传与覆盖**：写完新内部文件后，更新对象的 `files` 和 `size`，再登记原对象的内部文件供 GC 清理。
-- **读取**：取得对象的内部文件和总大小，打开内部文件并按序组合成读取流。HTTP 层负责传输，并通过 `Close` 关闭全部读取流。
+- **上传与覆盖**：写完新内部文件后，生成 ETag，一次更新对象的 `files`、`size` 和 `etag`，再登记原对象的内部文件供 GC 清理。
+- **读取**：取得对象的内部文件、总大小和 ETag，按读取范围组合文件流，具体见下文 range 下载。
 - **删除**：取得对象的内部文件名并删除对象记录，再登记这些文件供 GC 清理。
+
+### range 下载
+
+HTTP 层解析 `Range`、`If-Range` 并交给 Service。Service 一次取得对象的 `files`、`size` 和 `etag`，比较指定的 ETag 并确定实际读取范围。
+
+文件存储按各文件大小定位所需文件，通过 FileBlob 按文件内偏移和长度读取，再按序组合成流。HTTP 层负责生成响应、传输和关闭读取流。
 
 ### 桶与列表
 
@@ -52,7 +60,7 @@ HTTP 层按方法、路径和查询参数选择操作，将桶名、key 和请�
 - **创建分片上传任务**：生成任务 ID。
 - **上传分片**：写完新内部文件后，插入或替换 `upload_parts` 记录，再登记旧内部文件供 GC 清理。
 - **查询分片**：按编号升序读取分片记录。
-- **完成分片上传任务**：在同一事务内更新对象的 `files` 和 `size`，删除分片上传任务及分片记录，随后登记被覆盖对象的内部文件供 GC 清理。
+- **完成分片上传任务**：生成 ETag，在同一事务内更新对象的 `files`、`size` 和 `etag`，删除分片上传任务及分片记录，随后登记被覆盖对象的内部文件供 GC 清理。
 - **取消分片上传任务**：删除分片上传任务及分片记录，再登记其内部文件供 GC 清理。
 
 涉及多条业务元数据记录的变更在同一事务中提交。Service 在删除记录前取得废弃文件名，业务变更提交后再独立、尽力登记到 `gc_files`；登记失败不回滚业务变更，也不改变请求结果。
@@ -68,6 +76,8 @@ GC 启动一个后台 goroutine，在启动时和之后定期扫描待清理文�
 HTTP 层不持有锁，各请求在自己的 goroutine 中调用 Service，由 Service 协调并发。
 
 Service 按 `(bucket, key)` 使用对象互斥锁。`PutObject`、`GetObject`、`DeleteObject`、`CompleteMultipartUpload` 从方法开始到返回全程持锁，包括废弃文件登记；不同对象使用不同的锁。
+
+`GetObject` 在释放对象锁前打开全部所需文件；后续传输使用这些读取流，保证覆盖、删除和 GC 清理后仍能读取原版本。
 
 `UploadPart` 按 `(uploadId, partNumber)` 使用分片互斥锁，从方法开始到返回全程持锁，包括旧文件登记；不同分片使用不同的锁，允许并行传输。
 

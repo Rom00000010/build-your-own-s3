@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func TestHTTPRoutes(t *testing.T) {
 		t.Run(tc.operation, func(t *testing.T) {
 			content := []byte{0, 0xff, '\n'}
 			stream := &trackedStream{Reader: bytes.NewReader(content)}
-			service := &stubService{names: []string{"one", "two"}, stream: stream, size: 3}
+			service := &stubService{names: []string{"one", "two"}, stream: stream, size: 3, etag: `"v1"`}
 			handler := NewHandler(service)
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, bytes.NewReader(content)))
@@ -52,6 +53,9 @@ func TestHTTPRoutes(t *testing.T) {
 				if response.Header().Get("Content-Length") != "3" || !stream.closed {
 					t.Fatal("下载应设置对象大小，并关闭 Service 返回的读取流")
 				}
+				if response.Header().Get("ETag") != service.etag || response.Header().Get("Accept-Ranges") != "bytes" {
+					t.Fatal("下载应返回 ETag 和 Accept-Ranges")
+				}
 			default:
 				if response.Body.Len() != 0 {
 					t.Fatalf("成功响应应无响应体，得到 %q", response.Body.String())
@@ -66,6 +70,69 @@ func TestHTTPRoutes(t *testing.T) {
 			response = httptest.NewRecorder()
 			handler.ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, nil))
 			requireHTTPError(t, response, 500, "InternalError")
+		})
+	}
+}
+
+// range 下载 HTTP 测试策略：三种写法各取代表，并传递 If-Range；格式错误和多个范围验证回退。
+// 用 stub 的完整或 range 下载结果检查 200/206、响应头、字节和流关闭。
+func TestHTTPRange(t *testing.T) {
+	const content = "abcdefghij"
+	const etag = `"v1"`
+	closed := &objectstorage.ByteRange{Start: int64Ptr(1), End: int64Ptr(3)}
+	tail := &objectstorage.ByteRange{Start: int64Ptr(7), End: int64Ptr(9)}
+	for _, tc := range []struct {
+		name, rangeHeader, ifRange string
+		wantRange, resultRange     *objectstorage.ByteRange
+		body, contentRange         string
+		status                     int
+	}{
+		{
+			name: "指定起止位置及 If-Range", rangeHeader: "bytes=1-3", ifRange: etag, wantRange: closed, resultRange: closed,
+			body: "bcd", contentRange: "bytes 1-3/10", status: 206,
+		},
+		{
+			name: "至末尾时回退完整下载", rangeHeader: "bytes=7-", ifRange: `"old"`,
+			wantRange: &objectstorage.ByteRange{Start: int64Ptr(7)}, status: 200,
+		},
+		{
+			name: "后缀", rangeHeader: "bytes=-3", wantRange: &objectstorage.ByteRange{End: int64Ptr(3)}, resultRange: tail,
+			body: "hij", contentRange: "bytes 7-9/10", status: 206,
+		},
+		{name: "格式错误", rangeHeader: "bytes=bad", status: 200},
+		{name: "多个范围", rangeHeader: "bytes=0-1,4-5", status: 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			if body == "" {
+				body = content
+			}
+			stream := &trackedStream{Reader: bytes.NewReader([]byte(body))}
+			service := &stubService{
+				stream: stream, size: int64(len(content)), etag: etag, resultRange: tc.resultRange,
+			}
+			request := httptest.NewRequest("GET", "/photos/note.txt", nil)
+			request.Header.Set("Range", tc.rangeHeader)
+			request.Header.Set("If-Range", tc.ifRange)
+			response := httptest.NewRecorder()
+			NewHandler(service).ServeHTTP(response, request)
+			if service.calls != 1 || !reflect.DeepEqual(service.byteRange, tc.wantRange) || service.expectedETag != tc.ifRange {
+				t.Fatalf("GetObject 参数 = (%+v, %q)，次数 %d", service.byteRange, service.expectedETag, service.calls)
+			}
+			if response.Code != tc.status {
+				t.Fatalf("HTTP %d，期望 %d", response.Code, tc.status)
+			}
+			requireResponse(t, response, "application/octet-stream", body)
+			for name, want := range map[string]string{
+				"ETag": etag, "Accept-Ranges": "bytes", "Content-Length": strconv.Itoa(len(body)), "Content-Range": tc.contentRange,
+			} {
+				if got := response.Header().Get(name); got != want {
+					t.Fatalf("%s = %q，期望 %q", name, got, want)
+				}
+			}
+			if !stream.closed {
+				t.Fatal("响应结束后应关闭读取流")
+			}
 		})
 	}
 }
@@ -213,6 +280,7 @@ func TestHTTPErrorMapping(t *testing.T) {
 		{objectstorage.BucketNotEmptyErr, 409, "BucketNotEmpty"},
 		{objectstorage.BucketNotExistErr, 404, "BucketNotExist"},
 		{objectstorage.ObjectNotExistErr, 404, "ObjectNotExist"},
+		{objectstorage.InvalidRangeErr, 416, "InvalidRange"},
 		{objectstorage.InvalidMultipartRequestErr, 400, "InvalidMultipartRequest"},
 		{objectstorage.InvalidPartErr, 400, "InvalidPart"},
 		{objectstorage.IncompleteUploadErr, 400, "IncompleteUpload"},
@@ -330,6 +398,9 @@ type stubService struct {
 	names                  []string
 	stream                 *trackedStream
 	size                   int64
+	etag                   string
+	byteRange, resultRange *objectstorage.ByteRange
+	expectedETag           string
 	putObject              func(string, string, io.Reader) error
 	uploadID               string
 	totalParts, partNumber int
@@ -363,11 +434,12 @@ func (s *stubService) PutObject(bucket, key string, content io.Reader) error {
 	s.uploaded, err = io.ReadAll(content)
 	return err
 }
-func (s *stubService) GetObject(bucket, key string) (io.ReadCloser, int64, error) {
+func (s *stubService) GetObject(bucket, key string, byteRange *objectstorage.ByteRange, expectedETag string) (objectstorage.ObjectRead, error) {
+	s.byteRange, s.expectedETag = byteRange, expectedETag
 	if err := s.record("GetObject", bucket, key); err != nil {
-		return nil, 0, err
+		return objectstorage.ObjectRead{}, err
 	}
-	return s.stream, s.size, nil
+	return objectstorage.ObjectRead{Body: s.stream, Size: s.size, ETag: s.etag, Range: s.resultRange}, nil
 }
 func (s *stubService) DeleteObject(bucket, key string) error {
 	return s.record("DeleteObject", bucket, key)
@@ -424,3 +496,5 @@ func (s *trackedStream) Close() error {
 	s.closed = true
 	return nil
 }
+
+func int64Ptr(value int64) *int64 { return &value }

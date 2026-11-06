@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 )
 
@@ -16,6 +17,7 @@ var (
 	BucketNotEmptyErr          = errors.New("bucket is not empty")
 	InvalidObjectKeyErr        = errors.New("invalid object key")
 	ObjectNotExistErr          = errors.New("object does not exist")
+	InvalidRangeErr            = errors.New("invalid range")
 	InvalidMultipartRequestErr = errors.New("invalid multipart request")
 	InvalidPartErr             = errors.New("invalid part")
 	IncompleteUploadErr        = errors.New("incomplete upload")
@@ -25,6 +27,21 @@ var (
 type PartInfo struct {
 	PartNumber int
 	Size       int64
+}
+
+// ByteRange 表示 range 下载的字节范围，位置从 0 开始且包含两端。
+// 省略 End 表示读至末尾；省略 Start 时，End 表示读取末尾的字节数。
+type ByteRange struct {
+	Start *int64
+	End   *int64
+}
+
+// ObjectRead 包含同一版本的读取流、对象大小、ETag 和实际返回范围。
+type ObjectRead struct {
+	Body  io.ReadCloser
+	Size  int64 // 完整对象大小。
+	ETag  string
+	Range *ByteRange // nil 表示完整下载。
 }
 
 // Service 表示一份已打开的对象存储。关闭后不能继续使用该实例。
@@ -115,8 +132,8 @@ func (s *Service) DeleteBucket(name string) error {
 	return BucketNotEmptyErr
 }
 
-// PutObject 上传对象；同一 key 已存在时，完整替换原内容。
-func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
+// PutObject 上传对象并生成新 ETag；同一 key 已存在时，完整替换原内容。
+func (s *Service) PutObject(bucket string, key string, content io.Reader) error {
 	mu := s.objectMutex(bucket, key)
 	mu.Lock()
 	defer mu.Unlock()
@@ -131,52 +148,95 @@ func (s *Service) PutObject(bucket string, key string, object io.Reader) error {
 	if !validObjectKey(key) {
 		return InvalidObjectKeyErr
 	}
-	oldFiles, _, _, err := s.db.getObject(bucket, key)
+	old, _, err := s.db.getObject(bucket, key)
 	if err != nil {
 		return err
 	}
 	// 先写新文件，再切换元数据；文件写入失败时，原对象仍可读取。
-	newName, size, err := s.files.write(object)
+	newName, size, err := s.files.write(content)
 	if err != nil {
 		return err
 	}
 	newFile := objectFile{Name: newName, Size: size}
-	if err := s.db.setObject(bucket, key, []objectFile{newFile}, size); err != nil {
+	metadata := object{Files: []objectFile{newFile}, Size: size, ETag: strconv.Quote(rand.Text())}
+	if err := s.db.setObject(bucket, key, metadata); err != nil {
 		s.registerGarbageFiles(newFile)
 		return err
 	}
-	s.registerGarbageFiles(oldFiles...)
+	s.registerGarbageFiles(old.Files...)
 	return nil
 }
 
-// GetObject 返回对象读取流及大小；调用方负责关闭读取流。
-func (s *Service) GetObject(bucket string, key string) (io.ReadCloser, int64, error) {
+// GetObject 返回完整或 range 下载结果；ETag 不匹配时返回完整对象。
+// 调用方负责关闭 Body；后续覆盖或删除不影响该流的读取。
+func (s *Service) GetObject(bucket, key string, byteRange *ByteRange, expectedETag string) (ObjectRead, error) {
 	mu := s.objectMutex(bucket, key)
 	mu.Lock()
 	defer mu.Unlock()
 
 	exists, err := s.db.bucketExists(bucket)
 	if err != nil {
-		return nil, 0, err
+		return ObjectRead{}, err
 	}
 	if !exists {
-		return nil, 0, BucketNotExistErr
+		return ObjectRead{}, BucketNotExistErr
 	}
 	if !validObjectKey(key) {
-		return nil, 0, InvalidObjectKeyErr
+		return ObjectRead{}, InvalidObjectKeyErr
 	}
-	files, size, exists, err := s.db.getObject(bucket, key)
+	object, exists, err := s.db.getObject(bucket, key)
 	if err != nil {
-		return nil, 0, err
+		return ObjectRead{}, err
 	}
 	if !exists {
-		return nil, 0, ObjectNotExistErr
+		return ObjectRead{}, ObjectNotExistErr
 	}
-	stream, err := s.files.read(files)
+	if expectedETag != "" && expectedETag != object.ETag {
+		byteRange = nil
+	}
+	actualRange, err := byteRange.resolve(object.Size)
 	if err != nil {
-		return nil, 0, err
+		return ObjectRead{}, err
 	}
-	return stream, size, nil
+	offset, length := int64(0), object.Size
+	if actualRange != nil {
+		offset = *actualRange.Start
+		length = *actualRange.End - offset + 1
+	}
+	stream, err := s.files.read(object.Files, offset, length)
+	if err != nil {
+		return ObjectRead{}, err
+	}
+	return ObjectRead{Body: stream, Size: object.Size, ETag: object.ETag, Range: actualRange}, nil
+}
+
+// resolve 根据对象大小换算并校验实际读取范围；nil 表示完整下载。
+func (r *ByteRange) resolve(size int64) (*ByteRange, error) {
+	if r == nil {
+		return nil, nil
+	}
+	if size == 0 || r.Start == nil && r.End == nil {
+		return nil, InvalidRangeErr
+	}
+	start, end := int64(0), size-1
+	if r.Start == nil {
+		if *r.End <= 0 {
+			return nil, InvalidRangeErr
+		}
+		start = max(0, size-*r.End)
+	} else {
+		start = *r.Start
+		if start < 0 || start >= size {
+			return nil, InvalidRangeErr
+		}
+		if r.End != nil {
+			if *r.End < start {
+				return nil, InvalidRangeErr
+			}
+			end = min(end, *r.End)
+		}
+	}
+	return &ByteRange{Start: &start, End: &end}, nil
 }
 
 // DeleteObject 删除对象；key 不存在时也返回 nil。
@@ -195,7 +255,7 @@ func (s *Service) DeleteObject(bucket string, key string) error {
 	if !validObjectKey(key) {
 		return InvalidObjectKeyErr
 	}
-	files, _, exists, err := s.db.getObject(bucket, key)
+	object, exists, err := s.db.getObject(bucket, key)
 	if err != nil {
 		return err
 	}
@@ -205,7 +265,7 @@ func (s *Service) DeleteObject(bucket string, key string) error {
 	if err := s.db.deleteObject(bucket, key); err != nil {
 		return err
 	}
-	s.registerGarbageFiles(files...)
+	s.registerGarbageFiles(object.Files...)
 	return nil
 }
 
@@ -312,14 +372,15 @@ func (s *Service) CompleteMultipartUpload(bucket, key, uploadID string) error {
 	if len(files) != totalParts {
 		return IncompleteUploadErr
 	}
-	oldFiles, _, _, err := s.db.getObject(bucket, key)
+	old, _, err := s.db.getObject(bucket, key)
 	if err != nil {
 		return err
 	}
-	if err := s.db.completeMultipartUpload(bucket, key, uploadID, files, size); err != nil {
+	metadata := object{Files: files, Size: size, ETag: strconv.Quote(rand.Text())}
+	if err := s.db.completeMultipartUpload(bucket, key, uploadID, metadata); err != nil {
 		return err
 	}
-	s.registerGarbageFiles(oldFiles...)
+	s.registerGarbageFiles(old.Files...)
 	return nil
 }
 

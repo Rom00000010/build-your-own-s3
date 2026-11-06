@@ -12,6 +12,7 @@
 - **错误返回**：成功时 `err` 为 nil；失败时 `err` 非 nil，其他返回值为各自类型的零值。
 - **列表结果**：成功时返回非 nil 切片；没有元素时返回空切片。
 - **校验失败**：参数或业务条件不满足时，返回对应错误，存储状态不变。
+- **对象版本**：ETag 是对象当前版本的非空标识，每次成功发布对象时生成新标识，且不复用。
 
 ### 启动、关闭与持久化
 
@@ -74,18 +75,36 @@ func (s *Service) DeleteBucket(name string) error
 // PutObject 从 object 逐段读取内容，上传到名为 bucket 的桶中，以 key 标识。
 // object 须为非 nil 的 io.Reader。
 // 成功时，若 key 不存在则新增对象，否则用读取的内容完整替换原对象；其他对象和桶不变。
-// 读取或保存失败时，桶和对象的可见状态不变。
+// 对象内容与新 ETag 同时生效。
+// 读取或保存失败时，桶和对象的可见状态（包括 ETag）不变。
 func (s *Service) PutObject(bucket string, key string, object io.Reader) error
 ```
 
 ### GetObject
 
 ```go
-// GetObject 获取名为 bucket 的桶中 key 对应对象的读取流和实际大小。
+// ByteRange 表示 range 下载的字节范围，位置从 0 开始且包含两端。
+// 省略 End 表示读至末尾；省略 Start 时，End 表示读取末尾的字节数。
+type ByteRange struct {
+	Start *int64
+	End   *int64
+}
+
+type ObjectRead struct {
+	Body  io.ReadCloser
+	Size  int64 // 完整对象大小。
+	ETag  string
+	Range *ByteRange // nil 表示完整下载；range 下载时两端均有值，为实际返回的范围。
+}
+
+// GetObject 读取名为 bucket 的桶中 key 对应对象。
+// byteRange 为 nil 时完整下载，否则进行 range 下载；指定 expectedETag 且不匹配时改为完整下载。
+// 请求范围超出末尾时截断；范围不合法或不可满足时返回 InvalidRangeErr。
 // 若对象不存在，返回 ObjectNotExistErr。
-// 成功时返回非 nil 的 io.ReadCloser 和对象大小；调用方负责关闭读取流。
+// 成功时 Body 非 nil，内容、对象大小、ETag 和实际返回范围来自同一版本。
+// 调用方负责关闭 Body；后续覆盖或删除不影响该流的读取。
 // 无论成功或失败，存储状态不变。
-func (s *Service) GetObject(bucket string, key string) (io.ReadCloser, int64, error)
+func (s *Service) GetObject(bucket, key string, byteRange *ByteRange, expectedETag string) (ObjectRead, error)
 ```
 
 ### DeleteObject
@@ -140,6 +159,7 @@ func (s *Service) ListParts(bucket, key, uploadID string) ([]PartInfo, error)
 // CompleteMultipartUpload 按编号顺序将任务的全部分片发布为一个对象。
 // 缺少 1～totalParts 中任一分片时返回 IncompleteUploadErr，任务和对象不变。
 // 成功时一次性新增或完整覆盖目标 key，使任务失效；其他任务和对象不变。
+// 对象内容与新 ETag 同时生效；失败时保留已发布对象及其 ETag。
 func (s *Service) CompleteMultipartUpload(bucket, key, uploadID string) error
 
 // AbortMultipartUpload 使任务及其分片不再可访问；已发布对象及其他任务不变。

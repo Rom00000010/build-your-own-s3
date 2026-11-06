@@ -3,6 +3,7 @@ package objectstorage
 import (
 	"errors"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -48,8 +49,8 @@ func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
 					other <- err
 					return
 				}
-				var err error
-				stream, size, err = s.GetObject(tc.bucket, tc.key)
+				got, err := s.GetObject(tc.bucket, tc.key, nil, "")
+				stream, size = got.Body, got.Size
 				if err == nil {
 					err = s.DeleteObject(tc.bucket, tc.key)
 				}
@@ -101,8 +102,8 @@ func TestServiceSameObjectCallsWait(t *testing.T) {
 				case "PutObject":
 					next <- s.PutObject("photos", "note.txt", strings.NewReader("second"))
 				case "GetObject":
-					var err error
-					stream, size, err = s.GetObject("photos", "note.txt")
+					got, err := s.GetObject("photos", "note.txt", nil, "")
+					stream, size = got.Body, got.Size
 					next <- err
 				case "CompleteMultipartUpload":
 					next <- s.CompleteMultipartUpload("photos", "note.txt", id)
@@ -131,8 +132,8 @@ func TestServiceSameObjectCallsWait(t *testing.T) {
 	}
 }
 
-// 读取流测试策略：单文件和多文件对象，读取一部分后覆盖或删除同一对象。
-// 检查后续方法无需等待流关闭，原流仍返回原版本的剩余内容和大小。
+// 读取流测试策略：单文件完整下载、多文件跨片 range 下载，读取一部分后覆盖或删除。
+// 检查后续方法无需等待流关闭，原流仍返回原版本的内容、总大小及实际返回范围。
 func TestServiceOpenStreamKeepsVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name, operation string
@@ -154,23 +155,29 @@ func TestServiceOpenStreamKeepsVersion(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				var files []objectFile
-				for _, content := range tc.contents {
-					name, size, err := s.files.write(strings.NewReader(content))
-					if err != nil {
-						t.Fatal(err)
-					}
-					files = append(files, objectFile{Name: name, Size: size})
+				id := createTestUpload(t, s, "photos", "note.txt", len(tc.contents))
+				for i, content := range tc.contents {
+					uploadTestPart(t, s, "photos", "note.txt", id, i+1, []byte(content))
 				}
-				if err := s.db.setObject("photos", "note.txt", files, int64(len(original))); err != nil {
+				if err := s.CompleteMultipartUpload("photos", "note.txt", id); err != nil {
 					t.Fatal(err)
 				}
 			}
-			stream, size, err := s.GetObject("photos", "note.txt")
+			var byteRange *ByteRange
+			want := original
+			if len(tc.contents) > 1 {
+				byteRange = &ByteRange{int64Ptr(1), int64Ptr(8)}
+				want = original[1:9]
+			}
+			got, err := s.GetObject("photos", "note.txt", byteRange, "")
 			if err != nil {
 				t.Fatal(err)
 			}
+			stream := got.Body
 			t.Cleanup(func() { _ = stream.Close() })
+			if got.ETag == "" || !reflect.DeepEqual(got.Range, byteRange) {
+				t.Fatalf("读取元数据 = (ETag %q, Range %+v)，期望非空 ETag 和返回范围 %+v", got.ETag, got.Range, byteRange)
+			}
 			prefix := make([]byte, 3)
 			if _, err := io.ReadFull(stream, prefix); err != nil {
 				t.Fatal(err)
@@ -190,8 +197,8 @@ func TestServiceOpenStreamKeepsVersion(t *testing.T) {
 			}()
 			waitResult(t, change)
 			rest, err := io.ReadAll(stream)
-			if err != nil || string(prefix)+string(rest) != original || size != int64(len(original)) {
-				t.Fatalf("原流 = (%q, %d, %v)，期望 (%q, %d, nil)", string(prefix)+string(rest), size, err, original, len(original))
+			if err != nil || string(prefix)+string(rest) != want || got.Size != int64(len(original)) {
+				t.Fatalf("原流 = (%q, %d, %v)，期望 (%q, %d, nil)", string(prefix)+string(rest), got.Size, err, want, len(original))
 			}
 			if tc.operation == "覆盖" {
 				requireObjectContent(t, s, "photos", "note.txt", []byte("new"))
@@ -368,11 +375,11 @@ func pauseServiceUpload(t *testing.T, s *Service, bucket, key, uploadID string, 
 
 func requireServiceObjectMissing(t *testing.T, s *Service, bucket, key string) {
 	t.Helper()
-	stream, size, err := s.GetObject(bucket, key)
-	if stream != nil {
-		_ = stream.Close()
+	got, err := s.GetObject(bucket, key, nil, "")
+	if got.Body != nil {
+		_ = got.Body.Close()
 	}
-	if stream != nil || size != 0 || !errors.Is(err, ObjectNotExistErr) {
-		t.Fatalf("GetObject = (%v, %d, %v)，期望 (nil, 0, ObjectNotExistErr)", stream, size, err)
+	if got != (ObjectRead{}) || !errors.Is(err, ObjectNotExistErr) {
+		t.Fatalf("GetObject = (%+v, %v)，期望零值和 ObjectNotExistErr", got, err)
 	}
 }
