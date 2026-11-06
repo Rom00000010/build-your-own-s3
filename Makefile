@@ -4,26 +4,40 @@ SHELL := /bin/bash
 .NOTPARALLEL:
 .DEFAULT_GOAL := build
 
+BUILD_DIR ?= build
 DEPLOY_DIR ?= $(HOME)/tmp/my-s3
 
-.PHONY: help build run stop clean
+.PHONY: help build deploy run stop clean
 
 help:
 	@printf '%s\n' \
-		'make build  构建程序并复制页面到部署目录' \
-		'make run    后台运行；需先 build，已运行时先停止再启动' \
+		'make build  编译程序到本地构建目录' \
+		'make deploy 按需更新程序并整体复制页面，不编译、不重启' \
+		'make run    后台运行；需先 deploy，已运行时先停止再启动' \
 		'make stop   停止服务' \
 		'make clean  停止服务并删除整个部署目录，包括 data'
 
 build:
+	mkdir -p "$(BUILD_DIR)"
+	go build -o "$(BUILD_DIR)/s3.next" .
+	mv -f "$(BUILD_DIR)/s3.next" "$(BUILD_DIR)/s3"
+
+deploy:
+	@test -d web
+	if [[ ! -x "$(BUILD_DIR)/s3" && ! -x "$(DEPLOY_DIR)/s3" ]]; then
+		echo 'No executable available. Run make build first.' >&2
+		exit 1
+	fi
 	mkdir -p "$(DEPLOY_DIR)"
-	go build -o "$(DEPLOY_DIR)/s3.next" .
-	mv -f "$(DEPLOY_DIR)/s3.next" "$(DEPLOY_DIR)/s3"
+	if [[ -x "$(BUILD_DIR)/s3" ]] && ! cmp -s -- "$(BUILD_DIR)/s3" "$(DEPLOY_DIR)/s3"; then
+		cp -- "$(BUILD_DIR)/s3" "$(DEPLOY_DIR)/s3.next"
+		mv -f -- "$(DEPLOY_DIR)/s3.next" "$(DEPLOY_DIR)/s3"
+	fi
 	rm -rf -- "$(DEPLOY_DIR)/web"
 	cp -R web "$(DEPLOY_DIR)/web"
 
 run: stop
-	cd "$(DEPLOY_DIR)"
+	@cd "$(DEPLOY_DIR)"
 	test -x ./s3
 	nohup ./s3 >server.log 2>&1 < /dev/null &
 	echo $$! >server.pid
