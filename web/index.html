@@ -51,6 +51,7 @@
       <div class="page-heading">
         <h2 id="objects-heading"></h2>
         <span class="count" id="object-count"></span>
+        <button id="open-upload-list" class="upload-list-button" type="button" aria-controls="upload-panel" aria-expanded="false">上传列表</button>
       </div>
 
       <div class="panel">
@@ -86,6 +87,33 @@
       </div>
     </section>
   </main>
+
+  <aside id="upload-panel" class="upload-panel" aria-labelledby="upload-list-title" hidden>
+    <div class="upload-panel-heading">
+      <h2 id="upload-list-title">上传列表</h2>
+      <div class="upload-panel-actions">
+        <button id="cancel-uploads" type="button" aria-label="取消当前桶全部上传" disabled>取消全部</button>
+        <button id="close-upload-list" type="button" aria-label="关闭上传列表">关闭</button>
+      </div>
+    </div>
+    <p id="upload-summary" class="count" role="status">暂无上传记录</p>
+    <ol id="upload-task-list" class="upload-task-list"></ol>
+    <p class="upload-panel-note">记录仅保留在当前页面，刷新或关闭页面会中断上传。</p>
+    <template id="upload-task-item-template">
+      <li class="upload-task" data-state="uploading">
+        <div class="upload-task-heading">
+          <span class="item-name"></span>
+          <span class="task-state"></span>
+          <button type="button" data-action="task">取消</button>
+        </div>
+        <div class="upload-task-progress">
+          <progress max="100" value="0"></progress>
+          <span class="task-percent">0%</span>
+        </div>
+        <p class="field-error" hidden></p>
+      </li>
+    </template>
+  </aside>
 
   <dialog id="create-dialog" class="modal" aria-labelledby="create-title">
     <form id="create-form" novalidate>

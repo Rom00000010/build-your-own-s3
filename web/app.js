@@ -43,6 +43,15 @@ const uploadFileItemTemplate = document.querySelector('#upload-file-item-templat
 const uploadCancelButton = uploadDialog.querySelector('.cancel-button');
 const uploadSubmitButton = document.querySelector('#upload');
 
+// 上传列表
+const uploadListButton = document.querySelector('#open-upload-list');
+const uploadPanel = document.querySelector('#upload-panel');
+const closeUploadListButton = document.querySelector('#close-upload-list');
+const cancelUploadsButton = document.querySelector('#cancel-uploads');
+const uploadSummary = document.querySelector('#upload-summary');
+const uploadTaskList = document.querySelector('#upload-task-list');
+const uploadTaskItemTemplate = document.querySelector('#upload-task-item-template');
+
 // 删除确认弹窗
 const deleteDialog = document.querySelector('#delete-dialog');
 const deleteTitle = document.querySelector('#delete-title');
@@ -53,10 +62,14 @@ const deleteConfirmButton = document.querySelector('#confirm-delete');
 // 页面状态
 let currentBucket = null;
 let objectKeys = [];
+let objectListRequest = 0;
+let bucketListRequest = 0;
+const pendingRequests = new Map();
 const selectedObjects = new Set();
 let pendingDelete = null;
 let deletingObjects = false;
 let selectedUploads = [];
+const uploadTasks = [];
 
 // 输入规则与错误提示
 const bucketNameIsValid = name => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name);
@@ -74,11 +87,37 @@ const errorMessages = {
 };
 
 // 请求与错误处理
-async function requestApi(method, path, body) {
-  const response = await fetch(path, { method, body });
-  if (response.ok) return response;
-  const details = await response.json().catch(() => ({}));
-  throw new Error(errorMessages[details.error] || '操作失败，请重试。');
+async function requestApi(method, path) {
+  const bucket = decodeURIComponent(path.split('/')[1]);
+  pendingRequests.set(bucket, (pendingRequests.get(bucket) || 0) + 1);
+  updateBucketControls();
+  try {
+    const response = await fetch(path, { method });
+    if (response.ok) return method === 'GET' ? await response.json() : response;
+    const details = await response.json().catch(() => ({}));
+    throw new Error(errorMessages[details.error] || '操作失败，请重试。');
+  } finally {
+    const remaining = pendingRequests.get(bucket) - 1;
+    if (remaining) pendingRequests.set(bucket, remaining);
+    else pendingRequests.delete(bucket);
+    updateBucketControls();
+  }
+}
+
+function bucketIsBusy(bucket) {
+  return pendingRequests.has(bucket) || (deletingObjects && currentBucket === bucket)
+    || uploadTasks.some(task => task.bucket === bucket && uploadIsActive(task));
+}
+
+function updateBucketControls() {
+  const blocked = pendingRequests.has('');
+  createBucketButton.disabled = blocked;
+  createSubmitButton.disabled = blocked || createCancelButton.disabled || bucketIsBusy(bucketInput.value);
+  for (const item of bucketList.querySelectorAll('li[data-bucket]')) {
+    const bucket = item.dataset.bucket;
+    item.querySelector('[data-action="delete"]').disabled = blocked || bucketIsBusy(bucket);
+    item.querySelector('[data-action="open"]').disabled = blocked || pendingRequests.has(bucket);
+  }
 }
 
 function setOperationError(message) {
@@ -133,21 +172,16 @@ async function writeAndRefresh(writeAction, refreshAction, button, dialog) {
   }
 }
 
-// 弹窗通用行为
-for (const [dialog, submitButton] of [
-  [createDialog, createSubmitButton],
-  [uploadDialog, uploadSubmitButton],
-]) {
-  dialog.addEventListener('cancel', event => {
-    if (submitButton.disabled) event.preventDefault();
-  });
-}
+createDialog.addEventListener('cancel', event => {
+  if (createCancelButton.disabled) event.preventDefault();
+});
 
 // 桶列表
 async function refreshBuckets() {
-  const response = await requestApi('GET', '/');
-  const bucketNames = (await response.json()).buckets;
-  renderBuckets(bucketNames);
+  const request = ++bucketListRequest;
+  const { buckets } = await requestApi('GET', '/');
+  if (request !== bucketListRequest) return;
+  renderBuckets(buckets);
 }
 
 function renderBuckets(bucketNames) {
@@ -156,6 +190,7 @@ function renderBuckets(bucketNames) {
   bucketEmpty.hidden = bucketNames.length > 0;
   for (const name of bucketNames) {
     const item = bucketItemTemplate.content.firstElementChild.cloneNode(true);
+    item.dataset.bucket = name;
     const openButton = item.querySelector('[data-action="open"]');
     const deleteButton = item.querySelector('[data-action="delete"]');
     openButton.textContent = name;
@@ -166,25 +201,31 @@ function renderBuckets(bucketNames) {
         refreshBuckets, deleteButton)));
     bucketList.append(item);
   }
+  updateBucketControls();
 }
 
 async function openBucket(name) {
   selectedObjects.clear();
   currentBucket = name;
   const succeeded = await runAction(refreshObjects);
+  if (currentBucket !== name) return;
   if (!succeeded) {
     currentBucket = null;
     return;
   }
   objectsHeading.textContent = name;
+  renderUploadSummary();
   bucketsView.hidden = true;
   objectsView.hidden = false;
 }
 
 // 对象列表
 async function refreshObjects() {
-  const response = await requestApi('GET', `/${encodeURIComponent(currentBucket)}`);
-  objectKeys = (await response.json()).keys;
+  const bucket = currentBucket;
+  const request = ++objectListRequest;
+  const { keys } = await requestApi('GET', `/${encodeURIComponent(bucket)}`);
+  if (bucket !== currentBucket || request !== objectListRequest) return;
+  objectKeys = keys;
   renderObjects();
 }
 
@@ -239,6 +280,7 @@ function objectPath(key) {
 }
 
 backButton.addEventListener('click', () => {
+  showUploadList(false);
   clearOperationErrors();
   currentBucket = null;
   selectedObjects.clear();
@@ -258,7 +300,10 @@ function validateBucketName(showEmptyError = false) {
 
 createBucketButton.addEventListener('click', () => createDialog.showModal());
 
-bucketInput.addEventListener('input', () => validateBucketName());
+bucketInput.addEventListener('input', () => {
+  validateBucketName();
+  updateBucketControls();
+});
 
 createCancelButton.addEventListener('click', () => createDialog.close());
 
@@ -266,26 +311,33 @@ createDialog.addEventListener('close', () => {
   bucketInput.value = '';
   setInputError(bucketInput, bucketNameError, '');
   clearDialogError(createDialog);
+  updateBucketControls();
 });
 
 createForm.addEventListener('submit', async event => {
   event.preventDefault();
+  if (createSubmitButton.disabled) return;
   if (!validateBucketName(true)) return;
   const name = bucketInput.value;
   createCancelButton.disabled = true;
   await writeAndRefresh(() => requestApi('PUT', `/${encodeURIComponent(name)}`),
     refreshBuckets, createSubmitButton, createDialog);
   createCancelButton.disabled = false;
+  updateBucketControls();
 });
 
 // 上传弹窗
 function renderUploadFiles() {
   const names = new Set();
+  const uploading = new Set(uploadTasks
+    .filter(task => task.bucket === currentBucket && uploadIsActive(task))
+    .map(task => task.key));
   uploadFileList.replaceChildren();
   for (const entry of selectedUploads) {
     entry.error = '';
     if (!objectKeyIsValid(entry.file.name)) entry.error = errorMessages.InvalidObjectKey;
     else if (names.has(entry.file.name)) entry.error = '同名文件只上传列表中的第一个。';
+    else if (uploading.has(entry.file.name)) entry.error = '该文件正在上传，请等待上传结束。';
     else names.add(entry.file.name);
 
     const item = uploadFileItemTemplate.content.firstElementChild.cloneNode(true);
@@ -324,25 +376,140 @@ uploadDialog.addEventListener('close', () => {
   clearDialogError(uploadDialog);
 });
 
-uploadForm.addEventListener('submit', async event => {
+uploadForm.addEventListener('submit', event => {
   event.preventDefault();
-  if (uploadSubmitButton.disabled) return;
   const files = selectedUploads.filter(entry => !entry.error).map(entry => entry.file);
   if (files.length === 0) {
     setInputError(fileInput, fileError, selectedUploads.length ? '没有可上传的文件，请重新选择。' : '请选择文件。');
     return;
   }
-  const controls = [fileInput, uploadCancelButton, ...uploadFileList.querySelectorAll('button')];
-  for (const control of controls) control.disabled = true;
-  await runAction(async () => {
-    const results = await Promise.allSettled(files.map(file => requestApi('PUT', objectPath(file.name), file)));
-    await refreshObjects();
-    if (results.some(result => result.status === 'rejected')) {
-      throw new Error('有文件上传失败，请重试。');
+  clearOperationErrors();
+  uploadDialog.close();
+  for (const file of files) startUpload(file);
+  showUploadList(true);
+});
+
+// 上传列表
+function uploadIsActive(task) {
+  return task.state === 'uploading' || task.state === 'saving';
+}
+
+function showUploadList(open) {
+  uploadPanel.hidden = !open;
+  uploadListButton.setAttribute('aria-expanded', String(open));
+}
+
+function renderUploadSummary() {
+  const tasks = uploadTasks.filter(task => task.bucket === currentBucket);
+  for (const task of uploadTasks) task.element.hidden = task.bucket !== currentBucket;
+  const active = tasks.filter(uploadIsActive).length;
+  const succeeded = tasks.filter(task => task.state === 'success').length;
+  const failed = tasks.filter(task => task.state === 'failed').length;
+  const cancelled = tasks.filter(task => task.state === 'cancelled').length;
+  uploadSummary.textContent = tasks.length
+    ? `${active} 个进行中 · ${succeeded} 个成功 · ${failed} 个失败 · ${cancelled} 个取消` : '暂无上传记录';
+  cancelUploadsButton.disabled = !tasks.some(task => task.state === 'uploading');
+  uploadListButton.textContent = tasks.length ? `上传列表（${tasks.length}）` : '上传列表';
+  updateBucketControls();
+}
+
+function renderUploadProgress(task) {
+  task.element.querySelector('progress').value = task.percent;
+  task.element.querySelector('.task-percent').textContent = `${task.percent}%`;
+}
+
+function renderUploadTask(task) {
+  task.element.dataset.state = task.state;
+  task.element.querySelector('.task-state').textContent = {
+    uploading: '上传中', saving: '正在保存', success: '上传成功', failed: '上传失败', cancelled: '已取消',
+  }[task.state];
+  const action = task.element.querySelector('[data-action="task"]');
+  action.textContent = uploadIsActive(task) ? '取消' : '移除';
+  action.disabled = task.state === 'saving';
+  action.setAttribute('aria-label', `${action.textContent} ${task.key}`);
+  const error = task.element.querySelector('.field-error');
+  error.textContent = task.error;
+  error.hidden = !task.error;
+  renderUploadProgress(task);
+  renderUploadSummary();
+  if (uploadDialog.open && task.bucket === currentBucket) renderUploadFiles();
+}
+
+function startUpload(file) {
+  const element = uploadTaskItemTemplate.content.firstElementChild.cloneNode(true);
+  const request = new XMLHttpRequest();
+  const task = { bucket: currentBucket, key: file.name, state: 'uploading', percent: 0, error: '', element, request };
+  element.querySelector('.item-name').textContent = file.name;
+  element.querySelector('progress').setAttribute('aria-label', `${file.name} 上传进度`);
+  element.querySelector('[data-action="task"]').addEventListener('click', () => {
+    if (uploadIsActive(task)) cancelUpload(task);
+    else {
+      uploadTasks.splice(uploadTasks.indexOf(task), 1);
+      element.remove();
+      renderUploadSummary();
     }
-    uploadDialog.close();
-  }, uploadSubmitButton);
-  for (const control of controls) control.disabled = false;
+  });
+  uploadTasks.push(task);
+  uploadTaskList.append(element);
+  renderUploadTask(task);
+
+  request.upload.onprogress = event => {
+    if (!event.lengthComputable || event.total === 0) return;
+    task.percent = Math.min(100, Math.floor(event.loaded / event.total * 100));
+    renderUploadProgress(task);
+  };
+  request.upload.onload = () => {
+    task.percent = 100;
+    task.state = 'saving';
+    renderUploadTask(task);
+  };
+  request.onloadend = async () => {
+    if (task.state === 'cancelled') return;
+    if (request.status >= 200 && request.status < 300) {
+      task.percent = 100;
+      task.state = 'saving';
+      renderUploadTask(task);
+      if (task.bucket === currentBucket) {
+        await refreshObjects().catch(() => {
+          if (task.bucket === currentBucket) setOperationError('上传已完成，但列表刷新失败。请刷新页面查看最新结果。');
+        });
+      }
+      task.state = 'success';
+    } else {
+      task.state = 'failed';
+      task.error = request.status === 0 ? '连接中断，请检查网络后重新上传。'
+        : errorMessages[request.response?.error] || '上传失败，请重新选择文件上传。';
+    }
+    renderUploadTask(task);
+  };
+  request.open('PUT', objectPath(file.name));
+  request.responseType = 'json';
+  request.send(file);
+}
+
+function cancelUpload(task) {
+  if (task.state !== 'uploading') return;
+  task.state = 'cancelled';
+  task.request.abort();
+  renderUploadTask(task);
+}
+
+cancelUploadsButton.addEventListener('click', () => {
+  for (const task of uploadTasks) {
+    if (task.bucket === currentBucket) cancelUpload(task);
+  }
+});
+
+uploadListButton.addEventListener('click', () => showUploadList(uploadPanel.hidden));
+closeUploadListButton.addEventListener('click', () => {
+  showUploadList(false);
+  uploadListButton.focus();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !document.querySelector('dialog[open]') && !uploadPanel.hidden) {
+    showUploadList(false);
+    uploadListButton.focus();
+  }
 });
 
 // 下载
@@ -395,6 +562,7 @@ async function deleteObjects(keys) {
   backButton.disabled = false;
   openUploadButton.disabled = false;
   updateObjectSelection();
+  updateBucketControls();
 }
 
 deleteSelectedButton.addEventListener('click', () => openObjectDeleteDialog([...selectedObjects]));

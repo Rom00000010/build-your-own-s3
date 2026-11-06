@@ -268,6 +268,37 @@ input::placeholder { color: light-dark(#8389a3, #a1abc3); }
 .upload-file-list .field-error { margin-top: .4rem; }
 .upload-file-list .is-invalid .item-name { color: light-dark(#a63f64, #f2a1bb); }
 
+/* 上传列表 */
+.upload-list-button { margin-left: auto; min-height: 36px; padding: .4rem .9rem; font-size: .85rem; }
+.upload-panel {
+  position: fixed;
+  z-index: 10;
+  inset: 92px 16px 16px auto;
+  width: min(420px, calc(100% - 32px));
+  display: flex;
+  flex-direction: column;
+  padding: 1.25rem;
+  border: 1px solid light-dark(#cad0de, #3b455a);
+  border-radius: 12px;
+  background: light-dark(#f8f9fb, #202532);
+  box-shadow: 0 12px 40px light-dark(rgb(38 42 63 / 20%), rgb(0 0 0 / 40%));
+}
+.upload-panel-heading, .upload-task-heading, .upload-task-progress { display: flex; align-items: center; gap: .65rem; }
+.upload-panel-heading { justify-content: space-between; }
+.upload-panel-actions { display: flex; gap: .5rem; }
+.upload-panel-heading h2 { margin: 0; font-size: 1.15rem; }
+.upload-panel-heading button, .upload-task button { min-height: 30px; padding: .3rem .65rem; font-size: .8rem; }
+.upload-task-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
+.upload-task { margin-bottom: .75rem; padding: .85rem; border: 1px solid light-dark(#dcdfe7, #3b455a); border-radius: 7px; }
+.task-state, .task-percent { flex: none; font-size: .78rem; }
+.upload-task-progress { margin-top: .6rem; }
+.upload-task progress { flex: 1; min-width: 0; height: 6px; accent-color: light-dark(#2d539e, #a9c2ff); }
+.task-percent { min-width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+.upload-task .field-error { margin-top: .6rem; }
+.upload-task[data-state="success"] .task-state { color: light-dark(#37725e, #91c9b0); }
+.upload-task[data-state="failed"] .task-state { color: light-dark(#a63f64, #f2a1bb); }
+.upload-panel-note { margin: .75rem 0 0; color: light-dark(#788098, #adb6cb); font-size: .75rem; line-height: 1.5; }
+
 /* 窄屏布局 */
 @media (max-width: 700px) {
   .topbar-inner, .workspace { width: min(100% - 2rem, 1100px); }
@@ -277,4 +308,6 @@ input::placeholder { color: light-dark(#8389a3, #a1abc3); }
   .item-name { flex-basis: 100%; }
   #object-list .item-name { flex-basis: calc(100% - 32px); }
   .modal { padding: 1.2rem; }
+  .page-heading { flex-wrap: wrap; }
+  .upload-panel { inset: 86px 8px 8px auto; width: calc(100% - 16px); }
 }
