@@ -58,8 +58,8 @@ type partKey struct {
 	partNumber int
 }
 
-// Open 打开当前工作目录下 data 中的存储；首次打开时创建空存储。
-func Open() (*Service, error) {
+// Open 连接 PostgreSQL 元数据，并打开当前工作目录下 data 中的文件存储。
+func Open(connectionString string) (*Service, error) {
 	root, err := os.Getwd()
 	if err != nil {
 		return nil, err
@@ -69,7 +69,7 @@ func Open() (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := openObjectDB(filepath.Join(dataDir, "metadata.db"))
+	db, err := openObjectDB(connectionString)
 	if err != nil {
 		_ = files.close()
 		return nil, err

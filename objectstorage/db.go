@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type objectDB struct {
@@ -28,15 +28,14 @@ type uploadPart struct {
 	File       objectFile
 }
 
-func openObjectDB(path string) (*objectDB, error) {
-	conn, err := sql.Open("sqlite3", path)
+func openObjectDB(connectionString string) (*objectDB, error) {
+	conn, err := sql.Open("pgx", connectionString)
 	if err != nil {
 		return nil, err
 	}
 	conn.SetMaxOpenConns(1)
 
 	for _, statement := range []string{
-		`PRAGMA foreign_keys = ON`,
 		`CREATE TABLE IF NOT EXISTS buckets (
 			name TEXT PRIMARY KEY
 		)`,
@@ -44,7 +43,7 @@ func openObjectDB(path string) (*objectDB, error) {
 			bucket_name TEXT NOT NULL,
 			key TEXT NOT NULL,
 			files TEXT NOT NULL,
-			size INTEGER NOT NULL,
+			size BIGINT NOT NULL,
 			etag TEXT NOT NULL,
 			PRIMARY KEY (bucket_name, key),
 			FOREIGN KEY (bucket_name) REFERENCES buckets(name)
@@ -53,14 +52,14 @@ func openObjectDB(path string) (*objectDB, error) {
 			upload_id TEXT PRIMARY KEY,
 			bucket_name TEXT NOT NULL,
 			key TEXT NOT NULL,
-			total_parts INTEGER NOT NULL,
+			total_parts BIGINT NOT NULL,
 			FOREIGN KEY (bucket_name) REFERENCES buckets(name) ON DELETE CASCADE
 		)`,
 		`CREATE TABLE IF NOT EXISTS upload_parts (
 			upload_id TEXT NOT NULL,
-			part_number INTEGER NOT NULL,
+			part_number BIGINT NOT NULL,
 			file_name TEXT NOT NULL UNIQUE,
-			size INTEGER NOT NULL,
+			size BIGINT NOT NULL,
 			PRIMARY KEY (upload_id, part_number),
 			FOREIGN KEY (upload_id) REFERENCES multipart_uploads(upload_id) ON DELETE CASCADE
 		)`,
@@ -81,7 +80,7 @@ func (db *objectDB) close() error {
 }
 
 func (db *objectDB) createBucket(name string) (bool, error) {
-	result, err := db.conn.Exec(`INSERT INTO buckets(name) VALUES (?) ON CONFLICT(name) DO NOTHING`, name)
+	result, err := db.conn.Exec(`INSERT INTO buckets(name) VALUES ($1) ON CONFLICT(name) DO NOTHING`, name)
 	if err != nil {
 		return false, err
 	}
@@ -110,8 +109,8 @@ func (db *objectDB) listBuckets() ([]string, error) {
 }
 
 func (db *objectDB) deleteEmptyBucket(name string) (bool, error) {
-	result, err := db.conn.Exec(`DELETE FROM buckets WHERE name = ?
-		AND NOT EXISTS (SELECT 1 FROM objects WHERE bucket_name = ?)`, name, name)
+	result, err := db.conn.Exec(`DELETE FROM buckets WHERE name = $1
+		AND NOT EXISTS (SELECT 1 FROM objects WHERE bucket_name = $1)`, name)
 	if err != nil {
 		return false, err
 	}
@@ -121,7 +120,7 @@ func (db *objectDB) deleteEmptyBucket(name string) (bool, error) {
 
 func (db *objectDB) bucketExists(name string) (bool, error) {
 	var found int
-	err := db.conn.QueryRow(`SELECT 1 FROM buckets WHERE name = ?`, name).Scan(&found)
+	err := db.conn.QueryRow(`SELECT 1 FROM buckets WHERE name = $1`, name).Scan(&found)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -131,7 +130,7 @@ func (db *objectDB) bucketExists(name string) (bool, error) {
 func (db *objectDB) getObject(bucket, key string) (object, bool, error) {
 	var data string
 	var metadata object
-	err := db.conn.QueryRow(`SELECT files, size, etag FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key).Scan(&data, &metadata.Size, &metadata.ETag)
+	err := db.conn.QueryRow(`SELECT files, size, etag FROM objects WHERE bucket_name = $1 AND key = $2`, bucket, key).Scan(&data, &metadata.Size, &metadata.ETag)
 	if errors.Is(err, sql.ErrNoRows) {
 		return object{}, false, nil
 	}
@@ -149,19 +148,19 @@ func (db *objectDB) setObject(bucket, key string, object object) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.conn.Exec(`INSERT INTO objects(bucket_name, key, files, size, etag) VALUES (?, ?, ?, ?, ?)
+	_, err = db.conn.Exec(`INSERT INTO objects(bucket_name, key, files, size, etag) VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT(bucket_name, key) DO UPDATE SET files = excluded.files, size = excluded.size, etag = excluded.etag`,
 		bucket, key, string(data), object.Size, object.ETag)
 	return err
 }
 
 func (db *objectDB) deleteObject(bucket, key string) error {
-	_, err := db.conn.Exec(`DELETE FROM objects WHERE bucket_name = ? AND key = ?`, bucket, key)
+	_, err := db.conn.Exec(`DELETE FROM objects WHERE bucket_name = $1 AND key = $2`, bucket, key)
 	return err
 }
 
 func (db *objectDB) listObjects(bucket string) ([]string, error) {
-	rows, err := db.conn.Query(`SELECT key FROM objects WHERE bucket_name = ?`, bucket)
+	rows, err := db.conn.Query(`SELECT key FROM objects WHERE bucket_name = $1`, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -182,14 +181,14 @@ func (db *objectDB) listObjects(bucket string) ([]string, error) {
 }
 
 func (db *objectDB) createMultipartUpload(bucket, key, uploadID string, totalParts int) error {
-	_, err := db.conn.Exec(`INSERT INTO multipart_uploads(upload_id, bucket_name, key, total_parts) VALUES (?, ?, ?, ?)`,
+	_, err := db.conn.Exec(`INSERT INTO multipart_uploads(upload_id, bucket_name, key, total_parts) VALUES ($1, $2, $3, $4)`,
 		uploadID, bucket, key, totalParts)
 	return err
 }
 
 func (db *objectDB) getMultipartUpload(bucket, key, uploadID string) (int, bool, error) {
 	var totalParts int
-	err := db.conn.QueryRow(`SELECT total_parts FROM multipart_uploads WHERE upload_id = ? AND bucket_name = ? AND key = ?`,
+	err := db.conn.QueryRow(`SELECT total_parts FROM multipart_uploads WHERE upload_id = $1 AND bucket_name = $2 AND key = $3`,
 		uploadID, bucket, key).Scan(&totalParts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
@@ -199,7 +198,7 @@ func (db *objectDB) getMultipartUpload(bucket, key, uploadID string) (int, bool,
 
 func (db *objectDB) getPart(uploadID string, partNumber int) (objectFile, bool, error) {
 	var file objectFile
-	err := db.conn.QueryRow(`SELECT file_name, size FROM upload_parts WHERE upload_id = ? AND part_number = ?`,
+	err := db.conn.QueryRow(`SELECT file_name, size FROM upload_parts WHERE upload_id = $1 AND part_number = $2`,
 		uploadID, partNumber).Scan(&file.Name, &file.Size)
 	if errors.Is(err, sql.ErrNoRows) {
 		return objectFile{}, false, nil
@@ -208,14 +207,14 @@ func (db *objectDB) getPart(uploadID string, partNumber int) (objectFile, bool, 
 }
 
 func (db *objectDB) setPart(uploadID string, partNumber int, file objectFile) error {
-	_, err := db.conn.Exec(`INSERT INTO upload_parts(upload_id, part_number, file_name, size) VALUES (?, ?, ?, ?)
+	_, err := db.conn.Exec(`INSERT INTO upload_parts(upload_id, part_number, file_name, size) VALUES ($1, $2, $3, $4)
 		ON CONFLICT(upload_id, part_number) DO UPDATE SET file_name = excluded.file_name, size = excluded.size`,
 		uploadID, partNumber, file.Name, file.Size)
 	return err
 }
 
 func (db *objectDB) listParts(uploadID string) ([]uploadPart, error) {
-	rows, err := db.conn.Query(`SELECT part_number, file_name, size FROM upload_parts WHERE upload_id = ? ORDER BY part_number`, uploadID)
+	rows, err := db.conn.Query(`SELECT part_number, file_name, size FROM upload_parts WHERE upload_id = $1 ORDER BY part_number`, uploadID)
 	if err != nil {
 		return nil, err
 	}
@@ -244,25 +243,25 @@ func (db *objectDB) completeMultipartUpload(bucket, key, uploadID string, object
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO objects(bucket_name, key, files, size, etag) VALUES (?, ?, ?, ?, ?)
+	if _, err := tx.Exec(`INSERT INTO objects(bucket_name, key, files, size, etag) VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT(bucket_name, key) DO UPDATE SET files = excluded.files, size = excluded.size, etag = excluded.etag`,
 		bucket, key, string(data), object.Size, object.ETag); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM multipart_uploads WHERE upload_id = ?`, uploadID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM multipart_uploads WHERE upload_id = $1`, uploadID); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 func (db *objectDB) deleteMultipartUpload(uploadID string) error {
-	_, err := db.conn.Exec(`DELETE FROM multipart_uploads WHERE upload_id = ?`, uploadID)
+	_, err := db.conn.Exec(`DELETE FROM multipart_uploads WHERE upload_id = $1`, uploadID)
 	return err
 }
 
 func (db *objectDB) listBucketUploadFiles(bucket string) ([]objectFile, error) {
 	rows, err := db.conn.Query(`SELECT file_name, size FROM upload_parts
-		WHERE upload_id IN (SELECT upload_id FROM multipart_uploads WHERE bucket_name = ?)`, bucket)
+		WHERE upload_id IN (SELECT upload_id FROM multipart_uploads WHERE bucket_name = $1)`, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +290,7 @@ func (db *objectDB) addGCFiles(names []string) error {
 	}
 	defer tx.Rollback()
 	for _, name := range names {
-		if _, err := tx.Exec(`INSERT INTO gc_files(file_name) VALUES (?) ON CONFLICT(file_name) DO NOTHING`, name); err != nil {
+		if _, err := tx.Exec(`INSERT INTO gc_files(file_name) VALUES ($1) ON CONFLICT(file_name) DO NOTHING`, name); err != nil {
 			return err
 		}
 	}
@@ -325,7 +324,7 @@ func (db *objectDB) deleteGCFiles(names []string) error {
 	}
 	defer tx.Rollback()
 	for _, name := range names {
-		if _, err := tx.Exec(`DELETE FROM gc_files WHERE file_name = ?`, name); err != nil {
+		if _, err := tx.Exec(`DELETE FROM gc_files WHERE file_name = $1`, name); err != nil {
 			return err
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"build_your_own_s3/config"
 	"build_your_own_s3/httpserver"
 	"build_your_own_s3/objectstorage"
 )
@@ -21,7 +22,11 @@ func main() {
 }
 
 func run() (err error) {
-	service, err := objectstorage.Open()
+	cfg, err := config.Load("config.json")
+	if err != nil {
+		return err
+	}
+	service, err := objectstorage.Open(cfg.DatabaseURL())
 	if err != nil {
 		return err
 	}

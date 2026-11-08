@@ -3,6 +3,8 @@ package objectstorage
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"database/sql"
 	"errors"
 	"io"
 	"os"
@@ -13,6 +15,8 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"build_your_own_s3/config"
 )
 
 // Open 失败测试策略：让工作目录中的 data 路径无法作为目录使用，
@@ -22,7 +26,7 @@ func TestOpenFailure(t *testing.T) {
 	if err := os.WriteFile("data", []byte("occupied"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open()
+	s, err := Open("")
 	if s != nil || err == nil {
 		t.Fatalf("Open = (%v, %v)，期望 (nil, 非 nil 错误)", s, err)
 	}
@@ -455,8 +459,9 @@ func TestListObjects(t *testing.T) {
 // 持久化测试策略：创建、列出和删除桶，上传、覆盖和删除对象；让文件清理失败后重开，
 // 检查业务状态仍正确，旧文件继续清理。
 func TestPersistence(t *testing.T) {
+	connectionString := useTestDatabase(t)
 	useTempWorkingDir(t)
-	s, err := Open()
+	s, err := Open(connectionString)
 	if err != nil {
 		t.Fatalf("首次 Open 返回错误：%v", err)
 	}
@@ -517,7 +522,7 @@ func TestPersistence(t *testing.T) {
 		t.Fatalf("首次 Close 返回错误：%v", err)
 	}
 	opened = false
-	s, err = Open()
+	s, err = Open(connectionString)
 	if err != nil {
 		t.Fatalf("再次 Open 返回错误：%v", err)
 	}
@@ -603,10 +608,40 @@ func useTempWorkingDir(t *testing.T) {
 	})
 }
 
+// 每个测试使用独立 schema；重开 Service 仍访问同一份数据，结束后清理该 schema。
+func useTestDatabase(t *testing.T) string {
+	t.Helper()
+	cfg, err := config.Load("../config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectionString := cfg.DatabaseURL()
+	conn, err := sql.Open("pgx", connectionString)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("关闭测试数据库连接失败：%v", err)
+		}
+	})
+	schema := "test_" + strings.ToLower(rand.Text())
+	if _, err := conn.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("创建测试 schema 失败：%v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.Exec("DROP SCHEMA " + schema + " CASCADE"); err != nil {
+			t.Errorf("清理测试 schema 失败：%v", err)
+		}
+	})
+	return connectionString + "?search_path=" + schema
+}
+
 func setupTestStore(t *testing.T) *Service {
 	t.Helper()
+	connectionString := useTestDatabase(t)
 	useTempWorkingDir(t)
-	s, err := Open()
+	s, err := Open(connectionString)
 	if err != nil {
 		t.Fatalf("Open 返回错误：%v", err)
 	}

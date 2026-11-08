@@ -12,7 +12,7 @@ DEPLOY_DIR ?= $(HOME)/tmp/my-s3
 help:
 	@printf '%s\n' \
 		'make build  编译程序到本地构建目录' \
-		'make deploy 按需更新程序并整体复制页面，不编译、不重启' \
+		'make deploy 按需更新程序并复制页面与配置，不编译、不重启' \
 		'make run    后台运行；需先 deploy，已运行时先停止再启动' \
 		'make stop   停止服务' \
 		'make clean  停止服务并删除整个部署目录，包括 data'
@@ -24,6 +24,7 @@ build:
 
 deploy:
 	@test -d web
+	test -f config.json
 	if [[ ! -x "$(BUILD_DIR)/s3" && ! -x "$(DEPLOY_DIR)/s3" ]]; then
 		echo 'No executable available. Run make build first.' >&2
 		exit 1
@@ -35,6 +36,7 @@ deploy:
 	fi
 	rm -rf -- "$(DEPLOY_DIR)/web"
 	cp -R web "$(DEPLOY_DIR)/web"
+	cp -- config.json "$(DEPLOY_DIR)/config.json"
 
 run: stop
 	@cd "$(DEPLOY_DIR)"

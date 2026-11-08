@@ -19,9 +19,9 @@
 调用方通过 `Open` 获得 `Service` 实例，调用其方法操作存储，并在使用结束后调用 `Close`。
 
 ```go
-// Open 打开当前工作目录下 data 目录中的存储；若尚无数据，则创建空存储。
+// Open 根据 connectionString 连接元数据存储，并打开当前工作目录下 data 中的文件存储。
 // 成功时返回可操作的 Service 实例。
-func Open() (*Service, error)
+func Open(connectionString string) (*Service, error)
 
 // Close 关闭该实例，成功后不可继续使用；可重新调用 Open 获取新实例。
 func (s *Service) Close() error

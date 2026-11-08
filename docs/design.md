@@ -1,25 +1,25 @@
 # 对象存储设计
 
-本设计通过 HTTP 接口提供对象存储服务，并将桶和对象持久化到本地磁盘。
+本设计通过 HTTP 接口提供对象存储服务，将元数据保存在 PostgreSQL，对象内容保存在本地磁盘。
 
 [ADT.md](ADT.md) 定义存储模型；[specification.md](specification.md) 定义 HTTP 契约；[Service 规格](service/specification.md) 定义内部存储接口。
 
 ## 架构与模块
 
-服务入口组装 HTTP 层和 Service；HTTP 层调用 Service，Service 协调元数据与底层文件存储。
+服务入口读取配置，组装 HTTP 层和 Service；HTTP 层调用 Service，Service 协调元数据与底层文件存储。
 
 | 模块 | 职责 |
 | --- | --- |
 | 服务入口 | 打开存储、启动 HTTP 服务并管理关闭流程 |
 | HTTP 层 | 解析路径、查询参数和请求体，调用 Service 并转换响应 |
 | Service | 校验业务参数，协调元数据与文件操作 |
-| 元数据 | 通过 SQLite 管理桶、对象、分片上传任务、分片和待清理文件记录 |
+| 元数据 | 通过 PostgreSQL 管理桶、对象、分片上传任务、分片和待清理文件记录 |
 | 文件存储 | 封装 FileBlob，生成内部文件名并读写、删除内部文件 |
 | GC | 在后台扫描待清理记录并删除文件 |
 
 ## 数据表示
 
-数据位于当前工作目录的 `data/` 下：`metadata.db` 保存 SQLite 元数据，`objects/` 保存内部文件。内部文件使用随机生成的名称，每次上传写入新文件，写完后再更新元数据。
+PostgreSQL 保存元数据，当前工作目录的 `data/objects/` 保存内部文件。内部文件使用随机生成的名称，每次上传写入新文件，写完后再更新元数据。
 
 对象通过有序的 `files` 记录内部文件名和大小，`size` 为总大小。普通上传对应一个内部文件；每个分片也保存为一个内部文件，完成分片上传后，对象按分片编号顺序引用这些内部文件。
 
@@ -83,6 +83,6 @@ Service 按 `(bucket, key)` 使用对象互斥锁。`PutObject`、`GetObject`、
 
 GC 在后台删除已登记文件，不持有对象锁或分片锁。
 
-SQLite 通过事务协调元数据访问，FileBlob 支持不同文件并行传输（diskv不支持）；`ListObjects`、`ListParts` 各自依靠单次列表查询取得快照，不取对象锁或分片锁。
+PostgreSQL 通过事务协调元数据访问，FileBlob 支持不同文件并行传输（diskv不支持）；`ListObjects`、`ListParts` 各自依靠单次列表查询取得快照，不取对象锁或分片锁。
 
 桶操作以及分片上传任务的创建、取消不取锁，其并发限制由调用方保证；完成分片上传任务与同任务其他分片请求的重叠也由调用方避免。
