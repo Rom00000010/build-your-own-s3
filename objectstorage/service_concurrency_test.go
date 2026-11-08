@@ -13,6 +13,10 @@ import (
 // 不同对象测试策略：同桶不同 key、不同桶相同 key。
 // 暂停一个对象的上传，检查另一个对象仍能完成普通上传、分片发布、读取和删除。
 func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
+	testDifferentObjectsProgressIndependently(t, false)
+}
+
+func testDifferentObjectsProgressIndependently(t *testing.T, multipleInstances bool) {
 	for _, tc := range []struct {
 		name, bucket, key string
 	}{
@@ -20,7 +24,7 @@ func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
 		{"不同桶相同key", "documents", "note.txt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := setupTestStore(t)
+			s, otherStore := setupConcurrentTestStores(t, multipleInstances)
 			for _, bucket := range []string{"photos", "documents"} {
 				if _, err := s.CreateBucket(bucket); err != nil {
 					t.Fatal(err)
@@ -41,18 +45,18 @@ func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
 			})
 			go func() {
 				defer close(other)
-				if err := s.PutObject(tc.bucket, tc.key, strings.NewReader("other")); err != nil {
+				if err := otherStore.PutObject(tc.bucket, tc.key, strings.NewReader("other")); err != nil {
 					other <- err
 					return
 				}
-				if err := s.CompleteMultipartUpload(tc.bucket, tc.key, id); err != nil {
+				if err := otherStore.CompleteMultipartUpload(tc.bucket, tc.key, id); err != nil {
 					other <- err
 					return
 				}
-				got, err := s.GetObject(tc.bucket, tc.key, nil, "")
+				got, err := otherStore.GetObject(tc.bucket, tc.key, nil, "")
 				stream, size = got.Body, got.Size
 				if err == nil {
-					err = s.DeleteObject(tc.bucket, tc.key)
+					err = otherStore.DeleteObject(tc.bucket, tc.key)
 				}
 				other <- err
 			}()
@@ -69,9 +73,13 @@ func TestServiceDifferentObjectsProgressIndependently(t *testing.T) {
 // 同一对象测试策略：上传执行中，分别再调用上传、读取、删除和完成分片上传。
 // 用输入流暂停前一次上传，检查后一次调用等待，且完成后的结果符合串行执行。
 func TestServiceSameObjectCallsWait(t *testing.T) {
+	testSameObjectCallsWait(t, false)
+}
+
+func testSameObjectCallsWait(t *testing.T, multipleInstances bool) {
 	for _, operation := range []string{"PutObject", "GetObject", "DeleteObject", "CompleteMultipartUpload"} {
 		t.Run(operation, func(t *testing.T) {
-			s := setupTestStore(t)
+			s, otherStore := setupConcurrentTestStores(t, multipleInstances)
 			if _, err := s.CreateBucket("photos"); err != nil {
 				t.Fatal(err)
 			}
@@ -100,15 +108,15 @@ func TestServiceSameObjectCallsWait(t *testing.T) {
 				close(started)
 				switch operation {
 				case "PutObject":
-					next <- s.PutObject("photos", "note.txt", strings.NewReader("second"))
+					next <- otherStore.PutObject("photos", "note.txt", strings.NewReader("second"))
 				case "GetObject":
-					got, err := s.GetObject("photos", "note.txt", nil, "")
+					got, err := otherStore.GetObject("photos", "note.txt", nil, "")
 					stream, size = got.Body, got.Size
 					next <- err
 				case "CompleteMultipartUpload":
-					next <- s.CompleteMultipartUpload("photos", "note.txt", id)
+					next <- otherStore.CompleteMultipartUpload("photos", "note.txt", id)
 				default:
-					next <- s.DeleteObject("photos", "note.txt")
+					next <- otherStore.DeleteObject("photos", "note.txt")
 				}
 			}()
 			<-started
@@ -248,7 +256,11 @@ func TestServiceListObjectsDuringUpload(t *testing.T) {
 // 不同分片测试策略：暂停同一任务的第一片，检查第二片和列表查询无需等待。
 // 暂停期间列表只包含已保存的第二片；全部上传后按编号完成，检查实际内容。
 func TestServiceDifferentPartsProgressIndependently(t *testing.T) {
-	s := setupTestStore(t)
+	testDifferentPartsProgressIndependently(t, false)
+}
+
+func testDifferentPartsProgressIndependently(t *testing.T, multipleInstances bool) {
+	s, otherStore := setupConcurrentTestStores(t, multipleInstances)
 	if _, err := s.CreateBucket("photos"); err != nil {
 		t.Fatal(err)
 	}
@@ -262,12 +274,12 @@ func TestServiceDifferentPartsProgressIndependently(t *testing.T) {
 	})
 	go func() {
 		defer close(other)
-		if _, err := s.UploadPart("photos", "note.txt", id, 2, strings.NewReader("tail")); err != nil {
+		if _, err := otherStore.UploadPart("photos", "note.txt", id, 2, strings.NewReader("tail")); err != nil {
 			other <- err
 			return
 		}
 		var err error
-		parts, err = s.ListParts("photos", "note.txt", id)
+		parts, err = otherStore.ListParts("photos", "note.txt", id)
 		other <- err
 	}()
 	waitResult(t, other)
@@ -286,7 +298,11 @@ func TestServiceDifferentPartsProgressIndependently(t *testing.T) {
 // 同一分片测试策略：暂停一次替换，再查询列表并发起同编号替换。
 // 列表仍显示旧片，后一次上传必须等待；全部结束后发布，检查最后一次上传的内容。
 func TestServiceSamePartUploadsWait(t *testing.T) {
-	s := setupTestStore(t)
+	testSamePartUploadsWait(t, false)
+}
+
+func testSamePartUploadsWait(t *testing.T, multipleInstances bool) {
+	s, otherStore := setupConcurrentTestStores(t, multipleInstances)
 	if _, err := s.CreateBucket("photos"); err != nil {
 		t.Fatal(err)
 	}
@@ -304,12 +320,12 @@ func TestServiceSamePartUploadsWait(t *testing.T) {
 		defer close(next)
 		defer close(listed)
 		var err error
-		parts, err = s.ListParts("photos", "note.txt", id)
+		parts, err = otherStore.ListParts("photos", "note.txt", id)
 		listed <- err
 		if err != nil {
 			return
 		}
-		_, err = s.UploadPart("photos", "note.txt", id, 1, strings.NewReader("second"))
+		_, err = otherStore.UploadPart("photos", "note.txt", id, 1, strings.NewReader("second"))
 		next <- err
 	}()
 	waitResult(t, listed)
@@ -328,6 +344,38 @@ func TestServiceSamePartUploadsWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireObjectContent(t, s, "photos", "note.txt", []byte("second"))
+}
+
+// 跨实例测试策略：两个独立 Service 共享同一数据库和底层文件存储。
+// 复用单实例测试用例，检查同对象、同分片互斥，不同对象、不同分片仍可并行。
+func TestServiceMultipleInstances(t *testing.T) {
+	t.Run("同一对象等待", func(t *testing.T) { testSameObjectCallsWait(t, true) })
+	t.Run("同一分片等待", func(t *testing.T) { testSamePartUploadsWait(t, true) })
+	t.Run("不同对象并行", func(t *testing.T) { testDifferentObjectsProgressIndependently(t, true) })
+	t.Run("不同分片并行", func(t *testing.T) { testDifferentPartsProgressIndependently(t, true) })
+}
+
+func setupConcurrentTestStores(t *testing.T, multipleInstances bool) (*Service, *Service) {
+	t.Helper()
+	connectionString := useTestDatabase(t)
+	blobURL := useTestBlobStorage(t)
+	open := func() *Service {
+		s, err := Open(connectionString, blobURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := s.Close(); err != nil {
+				t.Errorf("Close 返回错误：%v", err)
+			}
+		})
+		return s
+	}
+	s := open()
+	if !multipleInstances {
+		return s, s
+	}
+	return s, open()
 }
 
 func waitResult(t *testing.T, result <-chan error) {

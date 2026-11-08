@@ -1,11 +1,14 @@
 package objectstorage
 
 import (
+	"context"
 	"crypto/rand"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
-	"sync"
 )
 
 var (
@@ -44,16 +47,10 @@ type ObjectRead struct {
 
 // Service 表示一份已打开的对象存储。关闭后不能继续使用该实例。
 type Service struct {
-	db          *objectDB
-	files       *objectStorage
-	gc          *garbageCollector
-	objectLocks sync.Map // map[[2]string]*sync.Mutex
-	partLocks   sync.Map // map[partKey]*sync.Mutex
-}
-
-type partKey struct {
-	uploadID   string
-	partNumber int
+	db       *objectDB
+	files    *objectStorage
+	gc       *garbageCollector
+	lockPool *sql.DB
 }
 
 // Open 根据 connectionString 打开 PostgreSQL 元数据存储，根据 blobURL 打开 WebDAV 文件存储。
@@ -67,7 +64,13 @@ func Open(connectionString, blobURL string) (*Service, error) {
 		_ = files.close()
 		return nil, err
 	}
-	return &Service{db: db, files: files, gc: newGC(db, files.remove)}, nil
+	lockPool, err := openConnectionPool(connectionString)
+	if err != nil {
+		_ = db.close()
+		_ = files.close()
+		return nil, err
+	}
+	return &Service{db: db, files: files, gc: newGC(db, files.remove), lockPool: lockPool}, nil
 }
 
 // Close 关闭存储。成功关闭后可再次调用 Open 读取已有数据。
@@ -76,7 +79,7 @@ func (s *Service) Close() error {
 		return errors.New("store is not open")
 	}
 	s.gc.close()
-	err := errors.Join(s.db.close(), s.files.close())
+	err := errors.Join(s.lockPool.Close(), s.db.close(), s.files.close())
 	s.db = nil
 	return err
 }
@@ -127,9 +130,11 @@ func (s *Service) DeleteBucket(name string) error {
 
 // PutObject 上传对象并生成新 ETag；同一 key 已存在时，完整替换原内容。
 func (s *Service) PutObject(bucket string, key string, content io.Reader) error {
-	mu := s.objectMutex(bucket, key)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock, err := s.lock(fmt.Sprintf("object:%q:%q", bucket, key))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	exists, err := s.db.bucketExists(bucket)
 	if err != nil {
@@ -163,9 +168,11 @@ func (s *Service) PutObject(bucket string, key string, content io.Reader) error 
 // GetObject 返回完整或 range 下载结果；ETag 不匹配时返回完整对象。
 // 调用方负责关闭 Body；后续覆盖或删除不影响该流的读取。
 func (s *Service) GetObject(bucket, key string, byteRange *ByteRange, expectedETag string) (ObjectRead, error) {
-	mu := s.objectMutex(bucket, key)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock, err := s.lock(fmt.Sprintf("object:%q:%q", bucket, key))
+	if err != nil {
+		return ObjectRead{}, err
+	}
+	defer unlock()
 
 	exists, err := s.db.bucketExists(bucket)
 	if err != nil {
@@ -234,9 +241,11 @@ func (r *ByteRange) resolve(size int64) (*ByteRange, error) {
 
 // DeleteObject 删除对象；key 不存在时也返回 nil。
 func (s *Service) DeleteObject(bucket string, key string) error {
-	mu := s.objectMutex(bucket, key)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock, err := s.lock(fmt.Sprintf("object:%q:%q", bucket, key))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	exists, err := s.db.bucketExists(bucket)
 	if err != nil {
@@ -298,9 +307,11 @@ func (s *Service) CreateMultipartUpload(bucket, key string, totalParts int) (str
 
 // UploadPart 保存非空分片，替换同编号的旧片；读取或保存失败时保留原分片。
 func (s *Service) UploadPart(bucket, key, uploadID string, partNumber int, content io.Reader) (PartInfo, error) {
-	mu := s.partMutex(uploadID, partNumber)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock, err := s.lock(fmt.Sprintf("part:%q:%d", uploadID, partNumber))
+	if err != nil {
+		return PartInfo{}, err
+	}
+	defer unlock()
 
 	totalParts, err := s.getMultipartUpload(bucket, key, uploadID)
 	if err != nil {
@@ -350,9 +361,11 @@ func (s *Service) ListParts(bucket, key, uploadID string) ([]PartInfo, error) {
 
 // CompleteMultipartUpload 将全部分片按编号发布为对象；缺片时保留任务和原对象。
 func (s *Service) CompleteMultipartUpload(bucket, key, uploadID string) error {
-	mu := s.objectMutex(bucket, key)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock, err := s.lock(fmt.Sprintf("object:%q:%q", bucket, key))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	totalParts, err := s.getMultipartUpload(bucket, key, uploadID)
 	if err != nil {
@@ -437,16 +450,30 @@ func (s *Service) getMultipartUpload(bucket, key, uploadID string) (int, error) 
 	return totalParts, nil
 }
 
-// objectMutex 返回同一对象共用的互斥锁，锁项随 Service 实例保留。
-func (s *Service) objectMutex(bucket, key string) *sync.Mutex {
-	mu, _ := s.objectLocks.LoadOrStore([2]string{bucket, key}, &sync.Mutex{})
-	return mu.(*sync.Mutex)
-}
-
-// partMutex 返回同一分片共用的互斥锁，锁项随 Service 实例保留。
-func (s *Service) partMutex(uploadID string, partNumber int) *sync.Mutex {
-	mu, _ := s.partLocks.LoadOrStore(partKey{uploadID, partNumber}, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+// lock 从独立锁池取得连接并加锁；调用方须在操作结束时解锁。
+func (s *Service) lock(resource string) (func(), error) {
+	ctx := context.Background()
+	conn, err := s.lockPool.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 锁在数据库内共享；schema 和资源类型将不同存储、不同种类的锁隔离。
+	const lockID = `hashtextextended(current_schema() || ':' || $1, 0)`
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(`+lockID+`)`, resource); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		_ = conn.Close()
+		return nil, err
+	}
+	unlock := func() {
+		var released bool
+		err := conn.QueryRowContext(ctx, `SELECT pg_advisory_unlock(`+lockID+`)`, resource).Scan(&released)
+		if err != nil || !released {
+			// 无法确认锁已释放时丢弃连接，避免连接带锁回到池中。
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}
+	return unlock, nil
 }
 
 func validBucketName(name string) bool {

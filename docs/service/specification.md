@@ -2,7 +2,7 @@
 
 存储接口由 `build_your_own_s3/objectstorage` 包提供。
 
-并发约定见[总规格的“并发”一节](../specification.md#并发)。
+并发约定见[总规格的“并发”一节](../specification.md#并发)。连接同一 PostgreSQL 元数据存储和 WebDAV 文件存储的多个 `Service` 实例共享桶、对象和分片任务；原有并发约定及调用方前提同时适用于实例内和跨实例的调用。
 
 ### 通用约定
 

@@ -28,12 +28,20 @@ type uploadPart struct {
 	File       objectFile
 }
 
-func openObjectDB(connectionString string) (*objectDB, error) {
+func openConnectionPool(connectionString string) (*sql.DB, error) {
 	conn, err := sql.Open("pgx", connectionString)
 	if err != nil {
 		return nil, err
 	}
-	conn.SetMaxOpenConns(1)
+	conn.SetMaxOpenConns(10)
+	return conn, nil
+}
+
+func openObjectDB(connectionString string) (*objectDB, error) {
+	conn, err := openConnectionPool(connectionString)
+	if err != nil {
+		return nil, err
+	}
 
 	for _, statement := range []string{
 		`CREATE TABLE IF NOT EXISTS buckets (

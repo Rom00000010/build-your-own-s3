@@ -75,11 +75,13 @@ GC 启动一个后台 goroutine，在启动时和之后定期扫描待清理文�
 
 HTTP 层不持有锁，各请求在自己的 goroutine 中调用 Service，由 Service 协调并发。
 
-Service 按 `(bucket, key)` 使用对象互斥锁。`PutObject`、`GetObject`、`DeleteObject`、`CompleteMultipartUpload` 从方法开始到返回全程持锁，包括废弃文件登记；不同对象使用不同的锁。
+多个实例共享 PostgreSQL 和 WebDAV，以 PostgreSQL 会话级 advisory lock 替代进程内互斥锁。各实例使用一致的资源标识区分对象锁与分片锁，使原有互斥范围跨实例生效。
+
+Service 按 `(bucket, key)` 使用对象锁。`PutObject`、`GetObject`、`DeleteObject`、`CompleteMultipartUpload` 从方法开始到返回全程持锁，包括废弃文件登记；不同对象使用不同的锁。
 
 `GetObject` 在释放对象锁前打开全部所需文件；后续传输使用这些读取流，保证覆盖、删除和 GC 清理后仍能读取原版本。
 
-`UploadPart` 按 `(uploadId, partNumber)` 使用分片互斥锁，从方法开始到返回全程持锁，包括旧文件登记；不同分片使用不同的锁，允许并行传输。
+`UploadPart` 按 `(uploadId, partNumber)` 使用分片锁，从方法开始到返回全程持锁，包括旧文件登记；不同分片使用不同的锁，允许并行传输。
 
 GC 在后台删除已登记文件，不持有对象锁或分片锁。
 
