@@ -229,7 +229,7 @@ func TestDeleteBucketWithMultipartUploads(t *testing.T) {
 // 分片持久化测试策略：保留部分上传的任务，重开后补齐并完成，再重开检查对象。
 func TestMultipartPersistence(t *testing.T) {
 	connectionString := useTestDatabase(t)
-	useTempWorkingDir(t)
+	blobURL := useTestBlobStorage(t)
 	var s *Service
 	reopen := func() {
 		t.Helper()
@@ -240,7 +240,7 @@ func TestMultipartPersistence(t *testing.T) {
 			s = nil
 		}
 		var err error
-		s, err = Open(connectionString)
+		s, err = Open(connectionString, blobURL)
 		if err != nil {
 			t.Fatal(err)
 		}

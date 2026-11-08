@@ -19,15 +19,15 @@
 调用方通过 `Open` 获得 `Service` 实例，调用其方法操作存储，并在使用结束后调用 `Close`。
 
 ```go
-// Open 根据 connectionString 连接元数据存储，并打开当前工作目录下 data 中的文件存储。
+// Open 根据 connectionString 打开 PostgreSQL 元数据存储，根据 blobURL 打开 WebDAV 文件存储。
 // 成功时返回可操作的 Service 实例。
-func Open(connectionString string) (*Service, error)
+func Open(connectionString, blobURL string) (*Service, error)
 
 // Close 关闭该实例，成功后不可继续使用；可重新调用 Open 获取新实例。
 func (s *Service) Close() error
 ```
 
-成功的桶和对象操作在正常关闭后再次打开时仍然可见，包括新建或删除的桶、上传或覆盖的对象，以及已删除的对象。
+成功的桶和对象操作在正常关闭后，重新打开同一数据库和文件存储时仍然可见，包括新建或删除的桶、上传或覆盖的对象，以及已删除的对象。
 
 未完成任务及已成功保存的分片在正常关闭后再次打开时仍可使用；已完成或取消的任务保持失效。
 

@@ -4,8 +4,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 )
@@ -58,14 +56,9 @@ type partKey struct {
 	partNumber int
 }
 
-// Open 连接 PostgreSQL 元数据，并打开当前工作目录下 data 中的文件存储。
-func Open(connectionString string) (*Service, error) {
-	root, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-	dataDir := filepath.Join(root, "data")
-	files, err := openObjectStorage(filepath.Join(dataDir, "objects"))
+// Open 根据 connectionString 打开 PostgreSQL 元数据存储，根据 blobURL 打开 WebDAV 文件存储。
+func Open(connectionString, blobURL string) (*Service, error) {
+	files, err := openObjectStorage(blobURL)
 	if err != nil {
 		return nil, err
 	}

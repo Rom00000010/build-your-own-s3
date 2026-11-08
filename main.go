@@ -26,7 +26,7 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
-	service, err := objectstorage.Open(cfg.DatabaseURL())
+	service, err := objectstorage.Open(cfg.DatabaseURL(), cfg.BlobURL())
 	if err != nil {
 		return err
 	}

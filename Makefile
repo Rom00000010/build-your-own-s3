@@ -7,15 +7,15 @@ SHELL := /bin/bash
 BUILD_DIR ?= build
 DEPLOY_DIR ?= $(HOME)/tmp/my-s3
 
-.PHONY: help build deploy run stop clean
+.PHONY: help build deploy run stop status
 
 help:
 	@printf '%s\n' \
 		'make build  编译程序到本地构建目录' \
-		'make deploy 按需更新程序并复制页面与配置，不编译、不重启' \
+		'make deploy 按需更新程序并复制页面与配置' \
 		'make run    后台运行；需先 deploy，已运行时先停止再启动' \
 		'make stop   停止服务' \
-		'make clean  停止服务并删除整个部署目录，包括 data'
+		'make status 查看本机 PostgreSQL、WebDAV 和 S3 的运行状态'
 
 build:
 	mkdir -p "$(BUILD_DIR)"
@@ -45,6 +45,21 @@ run: stop
 	echo $$! >server.pid
 	echo "Started: http://127.0.0.1:8080/_ui/ (log: $(DEPLOY_DIR)/server.log)"
 
+status:
+	@pg_lsclusters --no-header | awk '{ printf "%-12s %s\033[0m\n", "PostgreSQL:", ($$4 == "online" ? "\033[32m运行中" : "\033[31m已停止") }'
+	if systemctl is-active --quiet s3-blob; then
+		printf '%-12s \033[32m%s\033[0m\n' 'WebDAV:' '运行中'
+	else
+		printf '%-12s \033[31m%s\033[0m\n' 'WebDAV:' '已停止'
+	fi
+	pid=$$(cat "$(DEPLOY_DIR)/server.pid" 2>/dev/null || true)
+	executable=$$(readlink "/proc/$$pid/exe" 2>/dev/null || true)
+	if [[ "$$executable" == "$(DEPLOY_DIR)/s3" || "$$executable" == "$(DEPLOY_DIR)/s3 (deleted)" ]]; then
+		printf '%-12s \033[32m%s\033[0m\n' 'S3:' '运行中'
+	else
+		printf '%-12s \033[31m%s\033[0m\n' 'S3:' '已停止'
+	fi
+
 stop:
 	@if [[ -f "$(DEPLOY_DIR)/server.pid" ]]; then
 		pid=$$(cat "$(DEPLOY_DIR)/server.pid")
@@ -62,6 +77,3 @@ stop:
 		fi
 		rm -f -- "$(DEPLOY_DIR)/server.pid"
 	fi
-
-clean: stop
-	rm -rf -- "$(DEPLOY_DIR)"

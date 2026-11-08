@@ -8,21 +8,17 @@ import (
 	"io"
 
 	"gocloud.dev/blob"
-	"gocloud.dev/blob/fileblob"
 	"gocloud.dev/gcerrors"
+
+	_ "github.com/TuSKan/gocloud-ext/blob/httpblob"
 )
 
 type objectStorage struct {
 	bucket *blob.Bucket
 }
 
-func openObjectStorage(dir string) (*objectStorage, error) {
-	bucket, err := fileblob.OpenBucket(dir, &fileblob.Options{
-		CreateDir:   true,
-		DirFileMode: 0755,
-		NoTempDir:   true,
-		Metadata:    fileblob.MetadataDontWrite,
-	})
+func openObjectStorage(blobURL string) (*objectStorage, error) {
+	bucket, err := blob.OpenBucket(context.Background(), blobURL)
 	if err != nil {
 		return nil, err
 	}

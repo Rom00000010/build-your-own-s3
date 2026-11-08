@@ -7,7 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"io"
-	"os"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -18,19 +18,6 @@ import (
 
 	"build_your_own_s3/config"
 )
-
-// Open 失败测试策略：让工作目录中的 data 路径无法作为目录使用，
-// 检查返回 nil 实例和非 nil 错误。
-func TestOpenFailure(t *testing.T) {
-	useTempWorkingDir(t)
-	if err := os.WriteFile("data", []byte("occupied"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Open("")
-	if s != nil || err == nil {
-		t.Fatalf("Open = (%v, %v)，期望 (nil, 非 nil 错误)", s, err)
-	}
-}
 
 // CreateBucket 测试策略：
 //   - 长度：0、1、2–62、63、超过 63；字符：合法、非法。
@@ -460,8 +447,8 @@ func TestListObjects(t *testing.T) {
 // 检查业务状态仍正确，旧文件继续清理。
 func TestPersistence(t *testing.T) {
 	connectionString := useTestDatabase(t)
-	useTempWorkingDir(t)
-	s, err := Open(connectionString)
+	blobURL := useTestBlobStorage(t)
+	s, err := Open(connectionString, blobURL)
 	if err != nil {
 		t.Fatalf("首次 Open 返回错误：%v", err)
 	}
@@ -522,7 +509,7 @@ func TestPersistence(t *testing.T) {
 		t.Fatalf("首次 Close 返回错误：%v", err)
 	}
 	opened = false
-	s, err = Open(connectionString)
+	s, err = Open(connectionString, blobURL)
 	if err != nil {
 		t.Fatalf("再次 Open 返回错误：%v", err)
 	}
@@ -592,20 +579,43 @@ func requireStreamContent(t *testing.T, stream io.ReadCloser, size int64, want [
 	}
 }
 
-func useTempWorkingDir(t *testing.T) {
+// 复用配置中的 WebDAV 服务；每个测试使用唯一文件名前缀，结束后清理对应文件。
+func useTestBlobStorage(t *testing.T) string {
 	t.Helper()
-	oldDir, err := os.Getwd()
+	cfg, err := config.Load("../config.json")
 	if err != nil {
-		t.Fatalf("获取当前目录失败：%v", err)
+		t.Fatal(err)
 	}
-	if err := os.Chdir(t.TempDir()); err != nil {
-		t.Fatalf("进入测试目录失败：%v", err)
+	endpoint, err := url.Parse(cfg.BlobURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := endpoint.Query()
+	query.Set("prefix", "test_"+strings.ToLower(rand.Text())+"_")
+	endpoint.RawQuery = query.Encode()
+	blobURL := endpoint.String()
+	files, err := openObjectStorage(blobURL)
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.Chdir(oldDir); err != nil {
-			t.Errorf("恢复当前目录失败：%v", err)
+		defer files.close()
+		objects := files.bucket.List(nil)
+		for {
+			object, err := objects.Next(context.Background())
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
+				t.Errorf("列出测试文件失败：%v", err)
+				return
+			}
+			if err := files.remove(object.Key); err != nil {
+				t.Errorf("清理测试文件失败：%v", err)
+			}
 		}
 	})
+	return blobURL
 }
 
 // 每个测试使用独立 schema；重开 Service 仍访问同一份数据，结束后清理该 schema。
@@ -640,8 +650,8 @@ func useTestDatabase(t *testing.T) string {
 func setupTestStore(t *testing.T) *Service {
 	t.Helper()
 	connectionString := useTestDatabase(t)
-	useTempWorkingDir(t)
-	s, err := Open(connectionString)
+	blobURL := useTestBlobStorage(t)
+	s, err := Open(connectionString, blobURL)
 	if err != nil {
 		t.Fatalf("Open 返回错误：%v", err)
 	}
